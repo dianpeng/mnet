@@ -583,6 +583,22 @@ bool Listener::Bind( const Endpoint& endpoint ) {
     return true;
 }
 
+void Listener::HandleRunOutOfFD( int err ) {
+    // Handling the run out of file descriptors error here, if we
+    // don't kernel will not free any resource but continue bothering
+    // us for this problem.
+    switch( err ) {
+        case EMFILE:
+        case ENFILE:
+            // Run out the file descriptors and gracefully shutdown the peer side
+            VERIFY( ::close( dummy_fd_ ) == 0 );
+            VERIFY( ::close( ::accept(fd(), NULL , NULL ) ) == 0 );
+            VERIFY( (dummy_fd_ = ::open("/dev/null",O_RDONLY)) >= 0 );
+        default: return;
+    }
+    UNREACHABLE(return);
+}
+
 int Listener::DoAccept( NetState* state ) {
     assert( can_read() );
     int nfd = ::accept4( fd() , NULL , NULL , O_CLOEXEC | O_NONBLOCK );
@@ -591,6 +607,7 @@ int Listener::DoAccept( NetState* state ) {
             set_can_read(false);
             return -1;
         } else {
+            HandleRunOutOfFD( errno );
             state->CheckPoint(errno);
             return -1;
         }
@@ -607,7 +624,7 @@ void Listener::OnReadNotify() {
     else {
         NetState accept_state;
 
-        int nfd = DoAccept(&accept_state);
+        int nfd =DoAccept(&accept_state);
         if( nfd < 0 ) {
             if( !accept_state ) {
                 DO_INVOKE( user_accept_callback_ ,
@@ -633,6 +650,7 @@ void Listener::OnReadNotify() {
 }
 
 void Listener::OnException( const NetState& state ) {
+    HandleRunOutOfFD( state.error_code() );
     // We have an exception on the listener socket file descriptor
     if( !user_accept_callback_.IsNull() ) {
         DO_INVOKE( user_accept_callback_ ,
@@ -641,10 +659,21 @@ void Listener::OnException( const NetState& state ) {
     }
 }
 
+Listener::Listener() :
+    new_accept_socket_(NULL),
+    is_bind_( false ),
+    io_manager_(NULL)
+{
+    // Initialize the dummy_fd_ here
+    dummy_fd_ = ::open("/dev/null", O_RDONLY );
+    VERIFY( dummy_fd_ >= 0 );
+}
+
 Listener::~Listener() {
     // Closing the listen fd
     VERIFY( ::close(fd()) == 0 );
     set_fd(-1);
+    ::close( dummy_fd_ );
 }
 
 IOManager::IOManager() {

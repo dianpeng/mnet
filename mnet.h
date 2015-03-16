@@ -851,10 +851,7 @@ private:
 // simpler
 class Listener : public detail::Pollable {
 public:
-    Listener() :
-         is_bind_( false ),
-         io_manager_( NULL )
-        {}
+    Listener();
 
     ~Listener();
 
@@ -888,6 +885,8 @@ private:
 
     int DoAccept( NetState* state );
 
+    void HandleRunOutOfFD( int err );
+
 private:
     // User callback function
     detail::ScopePtr<detail::AcceptCallback> user_accept_callback_;
@@ -895,6 +894,10 @@ private:
 
     // This flag is used to tell the state of the current listener
     bool is_bind_;
+
+    // The following fd is used to gracefully shutdown the remote the
+    // remote connection when we are run out the FD (EMFILE/ENFILE).
+    int dummy_fd_;
 
     // This field represents the manager that this listener has been added
     // If it sets to zero, it means the listener has no attached IOManager

@@ -779,7 +779,6 @@ protected:
     }
 
 private:
-
     std::size_t DoRead( NetState* state );
     std::size_t DoWrite( NetState* state );
 
@@ -968,7 +967,8 @@ private:
 private:
 
     void DispatchLoop( const struct epoll_event* evnt , std::size_t sz );
-    void UpdateTimer( std::size_t event_sz , uint64_t prev_timer );
+    uint64_t UpdateTimer( std::size_t event_sz , uint64_t prev_timer );
+
     // This function is actually a hack to avoid potential stack overflow. The situation is
     // as follow, if we invoke user's notifier just when we find that we can get a new fd 
     // from accept inside of function AsyncAccept, then user could call AsyncAccept( which is
@@ -1067,21 +1067,29 @@ namespace mnet{
 
 template< typename T >
 void Socket::AsyncRead( T* notifier ) {
+    assert( state_ != CLOSED );
     assert( user_read_callback_.IsNull() );
     if( can_read() ) {
-        // We can directly read data from the kernel space
-        NetState state;
-        std::size_t sz = DoRead(&state);
-        // Checking if the read process goes smoothly or not
-        if( state ) {
-            if( sz > 0 ) {
-                // Notify user that we have something for you.
-                notifier->OnRead( this , sz , NetState(0) );
+        if( eof_ ) {
+            // This socket has been shutdown before previous DoRead 
+            // operation. We just call user notifier here
+            notifier->OnRead( this, 0 , NetState(0) );
+            return;
+        } else {
+            // We can directly read data from the kernel space
+            NetState state;
+            std::size_t sz = DoRead(&state);
+            // Checking if the read process goes smoothly or not
+            if( state ) {
+                if( sz > 0 ) {
+                    // Notify user that we have something for you.
+                    notifier->OnRead( this , sz , NetState(0) );
+                    return;
+                }
+            } else {
+                notifier->OnRead( this , sz , state );
                 return;
             }
-        } else {
-            notifier->OnRead( this , sz , state );
-            return;
         }
     }
     // Setup the watch operation
@@ -1092,6 +1100,7 @@ void Socket::AsyncRead( T* notifier ) {
 
 template< typename T >
 void Socket::AsyncWrite( T* notifier ) {
+    assert( state_ != CLOSED );
     assert( user_write_callback_.IsNull() );
     assert( write_buffer().readable_size() != 0 );
     prev_write_size_ = 0;
@@ -1123,15 +1132,25 @@ void Socket::AsyncClose( T* notifier ) {
     assert( state_ == NORMAL );
     // Issue the shutdown on the write pipe operations
     ::shutdown( fd() , SHUT_WR );
-    // Set the file descriptor to a invalid value
-    set_fd(-1);
+    // Set the state to closing here
+    state_ = CLOSING;
+
+    // Now we need to stuck on the read handler here
+    if( can_read() ) {
+        NetState state;
+        // Try to read the data from current fd
+        std::size_t sz =  DoRead( &state );
+        if( sz == 0 || !state ) {
+            Close();
+            notifier->OnClose();
+            return;
+        }
+    }
     // After shuting down, we are expecting for read here
     io_manager_->WatchRead(this);
     // Seting up the user close callback function
     user_close_callback_.Reset(
             detail::MakeCloseCallback(notifier));
-    // Set the state to correct state
-    state_ = CLOSING;
 }
 
 template< typename T >

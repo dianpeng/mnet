@@ -277,36 +277,34 @@ void Socket::OnReadNotify( ) {
     if( user_read_callback_.IsNull() ) {
         return;
     } else {
-        // Now since we have a user callback function registered here, so we
-        // gonna let our process run into the kernel to fetch all the data
         NetState state;
-        // Now we are able to read data directly otherwise the error is there
-        // we need to notify the user that we cannot read data
         std::size_t read_sz = DoRead(&state);
-
         if( state_ == CLOSING ) {
             if( state ) {
                 // We are in closing state, so it should be an asynchronous close
                 // We may still receive data here, we need to notify the user to
                 // consume the data here
-                if( !eof_ ) {
-                    if( read_sz > 0 )
-                        user_close_callback_->InvokeData( read_sz );
-                } else {
-                    user_close_callback_->InvokeClose(NetState(0));
-                    user_close_callback_.Reset(NULL);
+                if( read_sz > 0 ) {
+                    user_close_callback_->InvokeData( read_sz );
+                } 
+                
+                // Checking whether we hit eof during the last read
+                if( eof_ ) {
+                    detail::ScopePtr<detail::CloseCallback> cb( user_close_callback_.Release() );
+                    cb->InvokeClose(NetState(0));
+                    Close();
                     state_ = CLOSED;
-                    // INVALID the file descriptor underlying for the socket
-                    VERIFY(::close(fd()) == 0);
-                    set_fd(-1);
                 }
+
             } else {
+                // We failed here, so we just go straitforward to issue an
+                // Close operation on the notifier and close the underlying socket
                 user_close_callback_->InvokeClose(state);
+                Close();
                 state_ = CLOSED;
-                VERIFY(::close(fd()) == 0);
-                set_fd(-1);
             }
         } else {
+            // Invoke the callback function
             DO_INVOKE( user_read_callback_ ,
                 detail::ScopePtr<detail::ReadCallback>,
                 this,read_sz,state);
@@ -869,7 +867,7 @@ void IOManager::DispatchLoop( const struct epoll_event* event_queue , std::size_
     }
 }
 
-void IOManager::UpdateTimer( std::size_t event_sz , uint64_t prev_time ) {
+uint64_t IOManager::UpdateTimer( std::size_t event_sz , uint64_t prev_time ) {
     static const int kMinDiff = 3;
 #define TIME_TRIGGER(diff,t) (std::abs((t)-diff) < kMinDiff)
 
@@ -890,16 +888,17 @@ void IOManager::UpdateTimer( std::size_t event_sz , uint64_t prev_time ) {
                     break;
                 }
             }
+            return detail::GetCurrentTimeInMS();
         } else {
-            int diff = static_cast<int>( detail::GetCurrentTimeInMS() - prev_time );
+            int ret = detail::GetCurrentTimeInMS();
+            int diff = static_cast<int>( ret - prev_time );
             for( std::size_t i = 0 ; i < timer_queue_.size() ; ++i ) {
                 timer_queue_[i].time -= diff;
             }
+            return ret;
         }
     }
-
 #undef TIME_TRIGGER
-
 }
 
 void IOManager::ExecutePendingAccept() {
@@ -912,12 +911,12 @@ void IOManager::ExecutePendingAccept() {
 
 NetState IOManager::RunMainLoop() {
     struct epoll_event event_queue[ IOManager::kEpollEventLength ];
+    uint64_t prev_time = detail::GetCurrentTimeInMS();
     do {
         // 0. Execute pending accept
         ExecutePendingAccept();
         // 1. Set up the parameter that we need for the epoll_wait , it is very simple
         int tm = timer_queue_.empty() ? -1 : timer_queue_.front().time ;
-        uint64_t prev_time = detail::GetCurrentTimeInMS();
 
 repoll:
         int ret = ::epoll_wait( epoll_fd_ , event_queue , kEpollEventLength , tm );
@@ -935,7 +934,7 @@ repoll:
             // Do dispatch for the event here
             DispatchLoop( event_queue , static_cast<std::size_t>( ret ) );
             // Update or invoke the timer event.
-            UpdateTimer( static_cast<std::size_t>(ret) , prev_time );
+            prev_time = UpdateTimer( static_cast<std::size_t>(ret) , prev_time );
             // Checking whether we have been notified by interruption
             if( ctrl_fd_.is_wake_up() ) {
                 // We have been waken up by the caller, just return empty

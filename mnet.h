@@ -364,10 +364,11 @@ public:
     };
 public:
 
-    explicit Buffer( std::size_t capacity = 0 ) :
+    explicit Buffer( std::size_t capacity = 0 , bool fixed = false ) :
         read_ptr_(0),
         write_ptr_(0),
         capacity_(capacity),
+        is_fixed_( false ),
         mem_(NULL)
         { Grow(capacity); }
 
@@ -390,11 +391,12 @@ public:
     }
 
     void* Read( std::size_t* size ) ;
-    void Write( const void* mem , std::size_t size );
+    bool Write( const void* mem , std::size_t size );
+    std::size_t Fill( const void* mem , std::size_t size );
 
     // Inject will not cause overhead for memory, after injecting, if it
     // requires to malloc new memory, there will not be any extra space
-    void Inject( const void* mem , std::size_t size );
+    bool Inject( const void* mem , std::size_t size );
 
     std::size_t readable_size() const {
         return write_ptr_ - read_ptr_;
@@ -436,6 +438,10 @@ private:
     // Capacity represents how many actual bytes (in total) has been allocated
     // for the buffer object.
     std::size_t capacity_;
+
+    // Fixed buffer. If this buffer is fixed, then no internal memory grow 
+    // operation will be used. Once the buffer runs out, it will just fail
+    bool is_fixed_;
 
     // Pointer points to the memory buffer.
     void* mem_;

@@ -142,9 +142,12 @@ void* Buffer::Read( std::size_t* size ) {
     return mem;
 }
 
-void Buffer::Write( const void* mem , std::size_t length ) {
+bool Buffer::Write( const void* mem , std::size_t length ) {
     // Check if we have enough space to hold this memory
     if( writable_size() < length ) {
+        if( is_fixed_ ) 
+            return false;
+
         std::size_t ncap = length > capacity_ ? length : capacity_;
         ncap *= 2;
         // We cannot hold this buffer now, just grow the buffer here
@@ -153,15 +156,30 @@ void Buffer::Write( const void* mem , std::size_t length ) {
 
     memcpy(static_cast<char*>(mem_)+write_ptr_,mem,length);
     write_ptr_ += length;
+    return true;
 }
 
-void Buffer::Inject( const void* mem , std::size_t length ) {
+std::size_t Buffer::Fill( const void* mem , std::size_t length ) {
+    std::size_t sz = std::min(writable_size(),length);
+    if( sz == 0 )
+        return 0;
+    else {
+        memcpy(static_cast<char*>(mem_)+write_ptr_,mem,sz);
+        write_ptr_ += sz;
+        return sz;
+    }
+}
+
+bool Buffer::Inject( const void* mem , std::size_t length ) {
     if( writable_size() < length ) {
+        if( is_fixed_ )
+            return false;
         Grow(length);
     }
     memcpy(static_cast<char*>(mem_)+write_ptr_,mem,length);
     write_ptr_ += length;
     assert( write_ptr_ == capacity_ );
+    return true;
 }
 
 int Endpoint::Ipv4ToString( char* buf ) const {
@@ -410,7 +428,10 @@ std::size_t Socket::DoRead( NetState* ok ) {
                     // Inject the data into the buffer, this injection will not
                     // cause buffer overhead since they just write the data without
                     // preallocation
-                    read_buffer().Inject( stk , sz-accessor.size() );
+                    if( !read_buffer().Inject( stk , sz-accessor.size() ) ) {
+                        *ok = NetState(ENOBUFS);
+                        return read_sz;
+                    }
                 }
                 read_sz += sz;
 

@@ -279,7 +279,12 @@ void Socket::OnReadNotify( ) {
     } else {
         NetState state;
         std::size_t read_sz = DoRead(&state);
-        if( state_ == CLOSING ) {
+        if( state_ != CLOSING ) {
+            // Invoke the callback function
+            DO_INVOKE( user_read_callback_ ,
+                detail::ScopePtr<detail::ReadCallback>,
+                this,read_sz,state);
+        } else {
             if( state ) {
                 // We are in closing state, so it should be an asynchronous close
                 // We may still receive data here, we need to notify the user to
@@ -303,11 +308,6 @@ void Socket::OnReadNotify( ) {
                 Close();
                 state_ = CLOSED;
             }
-        } else {
-            // Invoke the callback function
-            DO_INVOKE( user_read_callback_ ,
-                detail::ScopePtr<detail::ReadCallback>,
-                this,read_sz,state);
         }
     }
 }

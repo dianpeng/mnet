@@ -34,6 +34,13 @@
         x; \
     } while(0)
 
+
+// This directory is used to make gcc options -Weffc++ and -Wnon-virtual-destructor 
+// happy. Since those option will force every class that has a virtual function needs
+// a non virtual destructor which is not very helpful in our cases. Anyway bearing 
+// those rules here. You could define this directory to make our code pass these warnings.
+// #define FORCE_VIRTUAL_DESTRUCTOR
+
 // MNet is a small library that is designed to solve massive concurrent
 // tcp connection to server. It is a extreamly small C++ library that is
 // strictly compatible with C++03 standard. It has only 4 class needs to
@@ -59,38 +66,61 @@ class Pollable;
 class ReadCallback {
 public:
     virtual void Invoke( Socket* socket , std::size_t size, const NetState& ok ) = 0;
-    virtual ~ReadCallback(){}
+
+#ifdef FORCE_VIRTUAL_DESTRUCTOR
+    virtual ~ReadCallback() {}
+#endif // FORCE_VIRTUAL_DESTRUCTOR
+
 };
 
 class WriteCallback {
 public:
     virtual void Invoke( Socket* socket , std::size_t size, const NetState& ok ) = 0;
-    virtual ~WriteCallback(){}
+
+#ifdef FORCE_VIRTUAL_DESTRUCTOR
+    virtual ~WriteCallback() {}
+#endif // FORCE_VIRTUAL_DESTRUCTOR
 };
 
 class ConnectCallback {
 public:
     virtual void Invoke( ClientSocket* socket , const NetState& ok ) =0;
-    virtual ~ConnectCallback(){}
+
+#ifdef FORCE_VIRTUAL_DESTRUCTOR
+    virtual ~ConnectCallback() {}
+#endif // FORCE_VIRTUAL_DESTRUCTOR
+
 };
 
 class AcceptCallback {
 public:
     virtual void Invoke( Socket* socket , const NetState& ok ) =0;
+
+#ifdef FORCE_VIRTUAL_DESTRUCTOR
     virtual ~AcceptCallback(){}
+#endif // FORCE_VIRTUAL_DESTRUCTOR
+
 };
 
 class TimeoutCallback {
 public:
     virtual void Invoke( int time ) =0;
-    virtual ~TimeoutCallback(){}
+
+#ifdef FORCE_VIRTUAL_DESTRUCTOR
+    virtual ~TimeoutCallback() {}
+#endif // FORCE_VIRTUAL_DESTRUCTOR
+
 };
 
 class CloseCallback {
 public:
     virtual void InvokeClose( const NetState& ok ) = 0;
     virtual void InvokeData( std::size_t sz ) = 0;
-    virtual ~CloseCallback(){}
+
+#ifdef FORCE_VIRTUAL_DESTRUCTOR
+    virtual ~CloseCallback() {}
+#endif // FORCE_VIRTUAL_DESTRUCTOR
+
 };
 
 namespace {

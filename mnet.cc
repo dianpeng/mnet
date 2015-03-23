@@ -24,13 +24,7 @@
 
 
 #ifndef NDEBUG
-#define VERIFY(cond) \
-    do {  \
-        if(!(cond)) {   \
-            fprintf(stderr,"Assertion failed:%s,(%d:%s)",#cond,errno,strerror(errno)); \
-            assert(0&&"VERIFY FAILED"); \
-        } \
-    } while(0)
+#define VERIFY assert
 #else
 #define VERIFY(cond) \
     do { \
@@ -72,7 +66,7 @@ void SetReuseAddr( int fd ) {
 // 1. O_NONBLOCK 2. O_CLOEXEC
 int NewFileDescriptor() {
     int fd = socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);
-    if (fd <0)
+    if (UNLIKELY(fd <0)) 
         return -1;
     // Setting up the FCNTL
     int flag = fcntl(fd,F_GETFL);
@@ -91,7 +85,7 @@ uint64_t GetCurrentTimeInMS() {
 
 int CreateTcpFileDescriptor() {
     int fd = NewFileDescriptor();
-    if( fd < 0 )
+    if( UNLIKELY(fd < 0) )
         return -1;
     SetTcpNoDelay(fd);
     SetReuseAddr(fd);
@@ -100,7 +94,7 @@ int CreateTcpFileDescriptor() {
 
 int CreateTcpListenerFileDescriptor() {
     int fd = NewFileDescriptor();
-    if( fd < 0 )
+    if( UNLIKELY(fd < 0) )
         return -1;
     SetReuseAddr(fd);
     return fd;
@@ -110,7 +104,7 @@ int CreateTcpListenerFileDescriptor() {
 
 
 void Buffer::Grow( std::size_t cap ) {
-    if( cap == 0 ) {
+    if( UNLIKELY(cap == 0) ) {
         return;
     }
     const std::size_t sz = cap + readable_size();
@@ -144,7 +138,7 @@ void* Buffer::Read( std::size_t* size ) {
 
 bool Buffer::Write( const void* mem , std::size_t length ) {
     // Check if we have enough space to hold this memory
-    if( writable_size() < length ) {
+    if( UNLIKELY(writable_size() < length) ) {
         if( is_fixed_ ) 
             return false;
 
@@ -161,7 +155,7 @@ bool Buffer::Write( const void* mem , std::size_t length ) {
 
 std::size_t Buffer::Fill( const void* mem , std::size_t length ) {
     std::size_t sz = std::min(writable_size(),length);
-    if( sz == 0 )
+    if( UNLIKELY(sz == 0) )
         return 0;
     else {
         memcpy(static_cast<char*>(mem_)+write_ptr_,mem,sz);
@@ -171,7 +165,7 @@ std::size_t Buffer::Fill( const void* mem , std::size_t length ) {
 }
 
 bool Buffer::Inject( const void* mem , std::size_t length ) {
-    if( writable_size() < length ) {
+    if( UNLIKELY(writable_size() < length) ) {
         if( is_fixed_ )
             return false;
         Grow(length);
@@ -255,16 +249,17 @@ int Endpoint::StringToPort( const char* buf ) {
     errno = 0 ;
     p = strtol(buf,&pend,10);
 
-    if( errno != 0 ) {
+    if( UNLIKELY(errno != 0) ) {
         port_ = kEndpointError;
         return -1;
+    } else {
+        if( UNLIKELY(p > 65535 || p < 0) ) {
+            port_ = kEndpointError;
+            return -1;
+        } else {
+            port_ = static_cast<uint32_t>(p);
+        }
     }
-
-    if( p > 65535 || p < 0 ) {
-        port_ = kEndpointError;
-        return -1;
-    }
-    port_ = static_cast<uint32_t>(p);
     return (pend-buf);
 }
 
@@ -274,33 +269,32 @@ void Socket::OnReadNotify( ) {
     // memory. If we detect that the user has not registered any callback
     // function just leave the data inside of the kernel and put the states
     // of current Pollable to readable
-    if( user_read_callback_.IsNull() ) {
+    if( UNLIKELY(user_read_callback_.IsNull()) ) {
         return;
     } else {
         NetState state;
         std::size_t read_sz = DoRead(&state);
-        if( state_ != CLOSING ) {
+        if( LIKELY(state_ != CLOSING) ) {
             // Invoke the callback function
             DO_INVOKE( user_read_callback_ ,
                 detail::ScopePtr<detail::ReadCallback>,
                 this,read_sz,state);
         } else {
-            if( state ) {
+            if( LIKELY(state) ) {
                 // We are in closing state, so it should be an asynchronous close
                 // We may still receive data here, we need to notify the user to
                 // consume the data here
-                if( read_sz > 0 ) {
+                if( UNLIKELY(read_sz > 0) ) {
                     user_close_callback_->InvokeData( read_sz );
-                } 
-                
-                // Checking whether we hit eof during the last read
-                if( eof_ ) {
-                    detail::ScopePtr<detail::CloseCallback> cb( user_close_callback_.Release() );
-                    cb->InvokeClose(NetState(0));
-                    Close();
-                    state_ = CLOSED;
+                } else {
+                    // Checking whether we hit eof during the last read
+                    if( eof_ ) {
+                        detail::ScopePtr<detail::CloseCallback> cb( user_close_callback_.Release() );
+                        cb->InvokeClose(NetState(0));
+                        Close();
+                        state_ = CLOSED;
+                    }
                 }
-
             } else {
                 // We failed here, so we just go straitforward to issue an
                 // Close operation on the notifier and close the underlying socket
@@ -315,13 +309,13 @@ void Socket::OnReadNotify( ) {
 void Socket::OnWriteNotify( ) {
     // Set up the can write flag
     set_can_write(true);
-    if( write_buffer().readable_size() == 0 ) {
+    if( UNLIKELY(write_buffer().readable_size() == 0) ) {
         // We do nothing since we have nothing to write out
         return;
     } else {
         NetState write_state;
         std::size_t write_sz = DoWrite(&write_state);
-        if( write_state ) {
+        if( LIKELY(write_state) ) {
             // We don't have an error just check if we hit the buffer size
             if( write_buffer().readable_size() == 0 ) {
                 // We have written all the data into the underlying socket
@@ -343,12 +337,12 @@ void Socket::OnWriteNotify( ) {
 
 void Socket::OnException( const NetState& state ) {
     assert( !state );
-    if( !user_read_callback_.IsNull() ) {
+    if( LIKELY(!user_read_callback_.IsNull()) ) {
         DO_INVOKE(user_read_callback_,
                   detail::ScopePtr<detail::ReadCallback>,
                   this,0,state);
     }
-    if( !user_write_callback_.IsNull() ) {
+    if( LIKELY(!user_write_callback_.IsNull()) ) {
         DO_INVOKE(user_write_callback_,
                   detail::ScopePtr<detail::WriteCallback>,
                   this,0,state);
@@ -368,7 +362,7 @@ std::size_t Socket::DoRead( NetState* ok ) {
 
     // When we are see eof, we will always spin on this states unless
     // user use Close/AsyncClose to move the socket state to correct one
-    if( eof_ ) {
+    if( UNLIKELY(eof_) ) {
         return 0;
     }
 
@@ -397,7 +391,7 @@ std::size_t Socket::DoRead( NetState* ok ) {
 
         if( sz < 0 ) {
             // Error happened
-            if( errno == EAGAIN || errno == EWOULDBLOCK ) {
+            if( LIKELY(errno == EAGAIN || errno == EWOULDBLOCK) ) {
                 set_can_read(false);
                 return read_sz;
             } else {
@@ -455,8 +449,8 @@ std::size_t Socket::DoWrite( NetState* ok ) {
     // do is that we will treat zero and -1 as same stuff and check
     // the errno value
 
-    if( sz <= 0 ) {
-        if( errno == EAGAIN || errno == EWOULDBLOCK ) {
+    if( UNLIKELY(sz <= 0) ) {
+        if( LIKELY(errno == EAGAIN || errno == EWOULDBLOCK) ) {
             // This is a partial operation, we need to wait until epoll_wait
             // to wake me up
             prev_write_size_ += sz;
@@ -504,63 +498,54 @@ void Socket::GetPeerEndpoint( Endpoint* endpoint ) {
 }
 
 void ClientSocket::OnReadNotify( ) {
-    switch( state_ ) {
-        case DISCONNECTED:
-            // When disconneted socket has any notifiaction
-            // just ignore it, maybe register a log information
-            return;
-        case CONNECTING:
-            // Read, for connecting, the read information is unrelated
-            // even if we receive it( we should not ), we just ignore
-            return;
-        case CONNECTED:
-            // When we connected, then we dispatch the read to parent
-            // handler
-            Socket::OnReadNotify();
-            return;
-        default:
-            UNREACHABLE(return);
+    if( LIKELY(state_ == CONNECTED) ) {
+        Socket::OnReadNotify();
+        return;
+    } else {
+        switch( state_ ) {
+            case DISCONNECTED:
+
+                // When disconneted socket has any notifiaction
+                // just ignore it, maybe register a log information
+                return;
+            case CONNECTING:
+                // Read, for connecting, the read information is unrelated
+                // even if we receive it( we should not ), we just ignore
+                return;
+            default:
+                UNREACHABLE(return);
+        }
     }
 }
 
 void ClientSocket::OnWriteNotify() {
-    switch( state_ ) {
-        case DISCONNECTED:
-            return;
-        case CONNECTING: {
+    if( LIKELY(state_ == CONNECTED) ) {
+        Socket::OnWriteNotify();
+        return;
+    } else {
+        if( state_ == CONNECTING ) {
             set_can_write(true);
             state_ = CONNECTED;
             DO_INVOKE(user_conn_callback_,
                       detail::ScopePtr<detail::ConnectCallback>,
                       this,NetState(0));
-            return;
-        case CONNECTED:
-            Socket::OnWriteNotify();
-            return;
-        default:
-            UNREACHABLE(return);
         }
     }
 }
 
 void ClientSocket::OnException( const NetState& state ) {
     assert( !state );
-    switch( state_ ) {
-        case DISCONNECTED:
-            return;
-        case CONNECTING:
+    if( LIKELY(state_ == CONNECTED) ) {
+        Socket::OnException(state);
+    } else {
+        if( state_ == CONNECTING ) {
             state_ = DISCONNECTED;
-            if( !user_conn_callback_.IsNull() ) {
+            if( UNLIKELY(!user_conn_callback_.IsNull()) ) {
                 DO_INVOKE(user_conn_callback_,
                           detail::ScopePtr<detail::ConnectCallback>,
                           this,state);
             }
-            return;
-        case CONNECTED:
-            Socket::OnException(state);
-            return;
-        default:
-            UNREACHABLE(return);
+        }
     }
 }
 
@@ -568,7 +553,7 @@ bool Listener::Bind( const Endpoint& endpoint ) {
     assert( is_bind_ == false );
     // Setting up the listener file descriptors
     int sock_fd = detail::CreateTcpListenerFileDescriptor();
-    if( sock_fd < 0 ) {
+    if( UNLIKELY(sock_fd < 0) ) {
         return false;
     }
     set_fd( sock_fd );
@@ -584,7 +569,7 @@ bool Listener::Bind( const Endpoint& endpoint ) {
     // Bind the address
     int ret = ::bind( fd(),
             reinterpret_cast<struct sockaddr*>(&ipv4) , sizeof(ipv4) );
-    if( ret != 0 ) {
+    if( UNLIKELY(ret != 0) ) {
         ::close(fd());
         set_fd(-1);
         return false;
@@ -592,7 +577,7 @@ bool Listener::Bind( const Endpoint& endpoint ) {
 
     // Set the fd as listen fd
     ret = ::listen( fd() , SOMAXCONN );
-    if( ret != 0 ) {
+    if( UNLIKELY(ret != 0) ) {
         ::close(fd());
         set_fd(-1);
         return false;
@@ -621,8 +606,8 @@ void Listener::HandleRunOutOfFD( int err ) {
 int Listener::DoAccept( NetState* state ) {
     assert( can_read() );
     int nfd = ::accept4( fd() , NULL , NULL , O_CLOEXEC | O_NONBLOCK );
-    if( nfd < 0 ) {
-        if( errno == EAGAIN || errno == EWOULDBLOCK ) {
+    if( UNLIKELY(nfd < 0) ) {
+        if( LIKELY(errno == EAGAIN || errno == EWOULDBLOCK) ) {
             set_can_read(false);
             return -1;
         } else {
@@ -638,13 +623,13 @@ int Listener::DoAccept( NetState* state ) {
 void Listener::OnReadNotify() {
     assert( is_bind_ );
     set_can_read( true );
-    if( user_accept_callback_.IsNull() )
+    if( UNLIKELY(user_accept_callback_.IsNull()) )
         return;
     else {
         NetState accept_state;
 
         int nfd =DoAccept(&accept_state);
-        if( nfd < 0 ) {
+        if( UNLIKELY(nfd < 0) ) {
             if( !accept_state ) {
                 DO_INVOKE( user_accept_callback_ ,
                         detail::ScopePtr<detail::AcceptCallback>,
@@ -680,8 +665,8 @@ void Listener::OnException( const NetState& state ) {
 
 Listener::Listener() :
     new_accept_socket_(NULL),
-    is_bind_( false ),
-    io_manager_(NULL)
+    io_manager_(NULL),
+    is_bind_( false )
 {
     // Initialize the dummy_fd_ here
     dummy_fd_ = ::open("/dev/null", O_RDONLY );
@@ -729,7 +714,6 @@ IOManager::~IOManager() {
         ctrl_fd_.set_fd(-1);
         ::close(epoll_fd_);
     }
-
     // Check if we have timer queue problem
     for( std::size_t i = 0 ; i < timer_queue_.size() ; ++i ) {
         delete timer_queue_[i].callback;
@@ -753,7 +737,6 @@ void IOManager::Interrupt() {
     ipv4.sin_family = AF_INET;
     socklen_t ipv4_len = sizeof(ipv4);
 
-
     int ret = ::getsockname( ctrl_fd_.fd(),
                 reinterpret_cast<struct sockaddr*>(&ipv4) , &ipv4_len );
 
@@ -775,7 +758,7 @@ void IOManager::Interrupt() {
 void IOManager::WatchRead( detail::Pollable* pollable ) {
     assert( pollable->Valid() );
     // We don't remove any file descriptors unless user explicitly require so
-    if( pollable->is_epoll_read_ )
+    if( LIKELY(pollable->is_epoll_read_) )
         return;
 
     struct epoll_event ev;
@@ -786,7 +769,7 @@ void IOManager::WatchRead( detail::Pollable* pollable ) {
     // Edge trigger for read
     ev.events = EPOLLIN | EPOLLET;
 
-    if( pollable->is_epoll_write_ ) {
+    if( UNLIKELY(pollable->is_epoll_write_) ) {
         op = EPOLL_CTL_MOD;
     } else {
         op = EPOLL_CTL_ADD;
@@ -801,7 +784,7 @@ void IOManager::WatchRead( detail::Pollable* pollable ) {
 
 void IOManager::WatchWrite( detail::Pollable* pollable ) {
     assert( pollable->Valid() );
-    if( pollable->is_epoll_write_ )
+    if( LIKELY(pollable->is_epoll_write_) )
         return;
 
     struct epoll_event ev;
@@ -810,7 +793,7 @@ void IOManager::WatchWrite( detail::Pollable* pollable ) {
     ev.data.ptr = pollable;
     ev.events = EPOLLOUT | EPOLLET;
 
-    if( pollable->is_epoll_read_ ) {
+    if( UNLIKELY(pollable->is_epoll_read_) ) {
         op = EPOLL_CTL_MOD;
     } else {
         op = EPOLL_CTL_ADD;
@@ -833,7 +816,7 @@ void IOManager::DispatchLoop( const struct epoll_event* event_queue , std::size_
         int ev = event_queue[i].events;
 
         // Handling error
-        if( ev & EPOLLERR ) {
+        if( UNLIKELY(ev & EPOLLERR) ) {
             // Get the per socket error here
             socklen_t len = sizeof(int);
             int err_no;
@@ -845,18 +828,18 @@ void IOManager::DispatchLoop( const struct epoll_event* event_queue , std::size_
             ev &= ~EPOLLERR;
         }
 
-        if( event_queue[i].events & EPOLLHUP ) {
+        if( UNLIKELY(event_queue[i].events & EPOLLHUP) ) {
             // Translate it into a read event
             p->OnReadNotify();
             continue;
         }
 
         // IN/OUT events
-        if( event_queue[i].events & EPOLLIN ) {
+        if( LIKELY(event_queue[i].events & EPOLLIN) ) {
             p->OnReadNotify();
             ev &= ~EPOLLIN;
         }
-        if( event_queue[i].events & EPOLLOUT ) {
+        if( LIKELY(event_queue[i].events & EPOLLOUT) ) {
             p->OnWriteNotify();
             ev &= ~EPOLLOUT;
         }
@@ -875,7 +858,7 @@ uint64_t IOManager::UpdateTimer( std::size_t event_sz , uint64_t prev_time ) {
         if( event_sz == 0 ) {
             uint64_t diff = timer_queue_.front().time;
             while( !timer_queue_.empty() ) {
-                if( TIME_TRIGGER(diff,timer_queue_.front().time) ) {
+                if( LIKELY(TIME_TRIGGER(diff,timer_queue_.front().time)) ) {
                     detail::ScopePtr<detail::TimeoutCallback> cb(
                         timer_queue_.front().callback);
 
@@ -921,9 +904,9 @@ NetState IOManager::RunMainLoop() {
 repoll:
         int ret = ::epoll_wait( epoll_fd_ , event_queue , kEpollEventLength , tm );
 
-        if( ret < 0 ) {
+        if( UNLIKELY(ret < 0) ) {
 
-            if( errno != EINTR )
+            if( LIKELY(errno != EINTR) )
                 return NetState(errno);
             else
                 // We don't need to go to the begining of the loop since this will cause us
@@ -936,7 +919,7 @@ repoll:
             // Update or invoke the timer event.
             prev_time = UpdateTimer( static_cast<std::size_t>(ret) , prev_time );
             // Checking whether we have been notified by interruption
-            if( ctrl_fd_.is_wake_up() ) {
+            if( UNLIKELY(ctrl_fd_.is_wake_up()) ) {
                 // We have been waken up by the caller, just return empty
                 // NetState here
                 return NetState(0);

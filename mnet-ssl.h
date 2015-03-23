@@ -1,6 +1,6 @@
 #ifndef MNET_SSL_H_
 #define MNET_SSL_H_
-#include "mnet-ssl.h"
+#include "mnet.h"
 #include <openssl/ssl.h>
 
 namespace mnet {

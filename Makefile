@@ -1,4 +1,4 @@
-FLAGS=-O3
+FAGS=-O3
 CC=g++
 all: libmnet
 

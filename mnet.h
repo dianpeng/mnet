@@ -35,6 +35,9 @@
     } while(0)
 
 
+#define LIKELY(x)       __builtin_expect((x),1)
+#define UNLIKELY(x)     __builtin_expect((x),0)
+
 // This directory is used to make gcc options -Weffc++ and -Wnon-virtual-destructor 
 // happy. Since those option will force every class that has a virtual function needs
 // a non virtual destructor which is not very helpful in our cases. Anyway bearing 
@@ -316,7 +319,7 @@ private:
     // spaces since we have no spaces to writing more data.
 
     void RewindBuffer() {
-        if( read_ptr_ == write_ptr_ ) {
+        if( UNLIKELY(read_ptr_ == write_ptr_) ) {
             read_ptr_ = write_ptr_ = 0;
         }
         // For write_ptr_ is same with capacity, we do nothing since
@@ -332,7 +335,7 @@ public:
     class Accessor {
     public:
         ~Accessor() {
-            if( has_committed_ )
+            if( UNLIKELY(has_committed_) )
                 return;
             *ptr_ref_ += committed_size_;
             owned_buffer_->RewindBuffer();
@@ -513,18 +516,20 @@ public:
 
     bool ParseFrom( const std::string& address ) {
         int off;
-        if( (off = StringToIpv4(address.c_str())) < 0 )
-            return false;
-
-        // Checking for that \":\" here
-        if( off > static_cast<int>(address.size()) || address[off] != ':' )
-            return false;
-
-        // Skip the Ip address part + ':'
-        if( (off = StringToPort(address.c_str()+off+1)) < 0 )
-            return false;
-
-        return true;
+        if( (off = StringToIpv4(address.c_str())) > 0 ) {
+            // Checking for that \":\" here
+            if( UNLIKELY(off > static_cast<int>(address.size()) || address[off] != ':') ) {
+                return false;
+            } else {
+                // Skip the Ip address part + ':'
+                if( UNLIKELY((off = StringToPort(address.c_str()+off+1)) < 0) ) {
+                    return false;
+                } else {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     bool HasError() const {
@@ -653,11 +658,11 @@ namespace detail {
 class Pollable {
 public:
     Pollable() :
+        fd_(-1),
         is_epoll_read_( false ),
         is_epoll_write_( false ),
         can_read_( false ),
-        can_write_( false ),
-        fd_(-1)
+        can_write_( false )
         {}
 
     virtual ~Pollable() {
@@ -719,6 +724,8 @@ protected:
     }
 
 private:
+    // File descriptors
+    int fd_;
     // If this fd has been added to epoll as epoll_read
     bool is_epoll_read_ ;
 
@@ -731,9 +738,6 @@ private:
 
     // Can write. This flag is must since we will use edge trigger
     bool can_write_;
-
-    // File descriptors
-    int fd_;
 
     friend class ::mnet::IOManager;
     friend class ::mnet::Listener;
@@ -866,9 +870,9 @@ private:
 
     // States for the ClientSocket
     enum {
+        CONNECTING ,
         DISCONNECTED,
         CONNECTED,
-        CONNECTING
     };
 
     // This state field indicates the status of this ClientSocket. The ClientSocket
@@ -927,9 +931,6 @@ private:
     detail::ScopePtr<detail::AcceptCallback> user_accept_callback_;
     Socket* new_accept_socket_;
 
-    // This flag is used to tell the state of the current listener
-    bool is_bind_;
-
     // The following fd is used to gracefully shutdown the remote the
     // remote connection when we are run out the FD (EMFILE/ENFILE).
     int dummy_fd_;
@@ -938,8 +939,10 @@ private:
     // If it sets to zero, it means the listener has no attached IOManager
     IOManager* io_manager_;
 
-    friend class IOManager;
+    // This flag is used to tell the state of the current listener
+    bool is_bind_;
 
+    friend class IOManager;
     DISALLOW_COPY_AND_ASSIGN(Listener);
 };
 
@@ -1099,8 +1102,8 @@ template< typename T >
 void Socket::AsyncRead( T* notifier ) {
     assert( state_ != CLOSED );
     assert( user_read_callback_.IsNull() );
-    if( can_read() ) {
-        if( eof_ ) {
+    if( UNLIKELY(can_read()) ) {
+        if( UNLIKELY(eof_) ) {
             // This socket has been shutdown before previous DoRead 
             // operation. We just call user notifier here
             notifier->OnRead( this, 0 , NetState(0) );
@@ -1110,7 +1113,7 @@ void Socket::AsyncRead( T* notifier ) {
             NetState state;
             std::size_t sz = DoRead(&state);
             // Checking if the read process goes smoothly or not
-            if( state ) {
+            if( UNLIKELY(state) ) {
                 if( sz > 0 ) {
                     // Notify user that we have something for you.
                     notifier->OnRead( this , sz , NetState(0) );
@@ -1135,12 +1138,12 @@ void Socket::AsyncWrite( T* notifier ) {
     assert( write_buffer().readable_size() != 0 );
     prev_write_size_ = 0;
 
-    if( can_write() ) {
+    if( UNLIKELY(can_write()) ) {
         NetState state;
         // It means we don't need to let the epoll to watch us
         // since we can do write without blocking here
         prev_write_size_ = DoWrite( &state );
-        if( !state ) {
+        if( UNLIKELY(!state) ) {
             notifier->OnWrite( this, prev_write_size_ , state );
             return;
         }
@@ -1170,7 +1173,7 @@ void Socket::AsyncClose( T* notifier ) {
         NetState state;
         // Try to read the data from current fd
         std::size_t sz =  DoRead( &state );
-        if( sz == 0 || !state ) {
+        if( LIKELY(sz == 0 || !state) ) {
             Close();
             notifier->OnClose();
             return;
@@ -1187,7 +1190,7 @@ template< typename T >
 void ClientSocket::AsyncConnect( const Endpoint& endpoint , T* notifier ) {
     assert( state_ == DISCONNECTED );
     int sock_fd = detail::CreateTcpFileDescriptor();
-    if( sock_fd < 0 ) {
+    if( UNLIKELY(sock_fd < 0) ) {
         notifier->OnConnect( this , NetState(errno) );
         return;
     }
@@ -1205,7 +1208,7 @@ void ClientSocket::AsyncConnect( const Endpoint& endpoint , T* notifier ) {
     int ret = ::connect( fd() ,
             reinterpret_cast<struct sockaddr*>(&ipv4addr),sizeof(ipv4addr));
 
-    if( ret == 0 ) {
+    if( UNLIKELY(ret == 0) ) {
         // Our connection is done here, this is possible when you
         // connect to a local host then kernel just succeeded at once
         // This typically happenes on FreeBSD.
@@ -1213,7 +1216,7 @@ void ClientSocket::AsyncConnect( const Endpoint& endpoint , T* notifier ) {
         notifier->OnConnect( this , NetState(0) );
         state_ = CONNECTED;
     } else {
-        if ( errno != EINPROGRESS ) {
+        if ( UNLIKELY(errno != EINPROGRESS) ) {
            // When the errno is not EINPROGRESS, this means that it is
            // not a recoverable error. Just return from where we are
            notifier->OnConnect( this , NetState(errno) );
@@ -1243,7 +1246,7 @@ void Listener::AsyncAccept( Socket* socket , T* notifier ) {
         // wake up which will be much more costy than an accept
         NetState state;
         int nfd = DoAccept(&state);
-        if( nfd < 0 ) {
+        if( UNLIKELY(nfd < 0) ) {
             if( !state ) {
                 // We meet an error, just notify user about this situation
                 io_manager_->SetPendingAccept( socket, notifier,state );

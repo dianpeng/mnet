@@ -2,6 +2,7 @@
 #define MNET_H_
 
 #include <iostream>
+#include <sstream>
 #include <cstddef>
 #include <cassert>
 #include <cstdlib>
@@ -596,39 +597,41 @@ private:
 };
 
 // NetState
+// =====================================================================
 // This class represents the error status for the related file descriptors.
 // User could use this fd to retrieve information about whether the fd has
 // error or not. It also provides function to get a readable text based
 // error description.
+// =====================================================================
+
+namespace state_category {
+static const int kDefault = 0;
+static const int kSystem = 1;
+}// namespace state_category
 
 class NetState {
 public:
-    explicit NetState( int err ) {
-        CheckPoint(err);
+    NetState( int cate, int err ) {
+        CheckPoint(cate,err);
     }
 
     NetState() :
+        category_(state_category::kDefault),
         error_code_(0) {
     }
 
-    bool CheckPoint( int err ) {
-
-        assert( err != EAGAIN &&
-                err != EINTR &&
-                err != EWOULDBLOCK &&
-                err != EINPROGRESS );
-
+    bool CheckPoint( int cate , int err ) {
+        category_ = cate;
         error_code_ = err;
-        error_description_ = ::strerror(err);
         return err != 0;
-    }
-
-    const std::string& error_description() const {
-        return error_description_;
     }
 
     int error_code() const {
         return error_code_;
+    }
+
+    int category() const {
+        return category_;
     }
 
     bool HasError() const {
@@ -641,14 +644,13 @@ public:
 
     void Clear() {
         error_code_ = 0;
-        error_description_.clear();
     }
 
 private:
+    // Error category for this one
+    int category_;
     // Error code for the NetState class
     int error_code_;
-    // Error description buffer to store the error description
-    std::string error_description_;
 };
 
 namespace detail {
@@ -1191,7 +1193,7 @@ void ClientSocket::AsyncConnect( const Endpoint& endpoint , T* notifier ) {
     assert( state_ == DISCONNECTED );
     int sock_fd = detail::CreateTcpFileDescriptor();
     if( UNLIKELY(sock_fd < 0) ) {
-        notifier->OnConnect( this , NetState(errno) );
+        notifier->OnConnect( this , NetState(state_category::kSystem,errno) );
         return;
     }
 
@@ -1219,7 +1221,7 @@ void ClientSocket::AsyncConnect( const Endpoint& endpoint , T* notifier ) {
         if ( UNLIKELY(errno != EINPROGRESS) ) {
            // When the errno is not EINPROGRESS, this means that it is
            // not a recoverable error. Just return from where we are
-           notifier->OnConnect( this , NetState(errno) );
+           notifier->OnConnect( this , NetState(state_category::kSystem,errno) );
            return;
         }
     }

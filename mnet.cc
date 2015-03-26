@@ -290,7 +290,7 @@ void Socket::OnReadNotify( ) {
                     // Checking whether we hit eof during the last read
                     if( eof_ ) {
                         detail::ScopePtr<detail::CloseCallback> cb( user_close_callback_.Release() );
-                        cb->InvokeClose(NetState(0));
+                        cb->InvokeClose(NetState());
                         Close();
                         state_ = CLOSED;
                     }
@@ -397,7 +397,7 @@ std::size_t Socket::DoRead( NetState* ok ) {
             } else {
                 // The current error is not recoverable, we just return with an error
                 // states here
-                ok->CheckPoint(errno);
+                ok->CheckPoint(state_category::kSystem,errno);
                 return read_sz;
             }
         } else {
@@ -421,7 +421,7 @@ std::size_t Socket::DoRead( NetState* ok ) {
                     // cause buffer overhead since they just write the data without
                     // preallocation
                     if( !read_buffer().Inject( stk , sz-accessor.size() ) ) {
-                        *ok = NetState(ENOBUFS);
+                        *ok = NetState(state_category::kSystem,ENOBUFS);
                         return read_sz;
                     }
                 }
@@ -458,7 +458,7 @@ std::size_t Socket::DoWrite( NetState* ok ) {
             return 0;
         } else {
             // Set up the error object and record the error string
-            ok->CheckPoint(errno);
+            ok->CheckPoint(state_category::kSystem,errno);
             // Return the size of the data has been sent to the kernel
             return prev_write_size_;
         }
@@ -528,7 +528,7 @@ void ClientSocket::OnWriteNotify() {
             state_ = CONNECTED;
             DO_INVOKE(user_conn_callback_,
                       detail::ScopePtr<detail::ConnectCallback>,
-                      this,NetState(0));
+                      this,NetState());
         }
     }
 }
@@ -612,7 +612,7 @@ int Listener::DoAccept( NetState* state ) {
             return -1;
         } else {
             HandleRunOutOfFD( errno );
-            state->CheckPoint(errno);
+            state->CheckPoint(state_category::kSystem,errno);
             return -1;
         }
     } else {
@@ -648,7 +648,7 @@ void Listener::OnReadNotify() {
 
             DO_INVOKE( user_accept_callback_ ,
                     detail::ScopePtr<detail::AcceptCallback>,
-                    s, NetState(0));
+                    s, NetState());
         }
     }
 }
@@ -822,7 +822,7 @@ void IOManager::DispatchLoop( const struct epoll_event* event_queue , std::size_
             int err_no;
             VERIFY( ::getsockopt(p->fd_,SOL_SOCKET,SO_ERROR,&err_no,&len) == 0 );
             if( err_no != 0 ) {
-                p->OnException( NetState(err_no) );
+                p->OnException( NetState(state_category::kSystem,err_no) );
                 continue;
             }
             ev &= ~EPOLLERR;
@@ -907,7 +907,7 @@ repoll:
         if( UNLIKELY(ret < 0) ) {
 
             if( LIKELY(errno != EINTR) )
-                return NetState(errno);
+                return NetState(state_category::kSystem,errno);
             else
                 // We don't need to go to the begining of the loop since this will cause us
                 // to reflush the timer there. Goto repoll label to start another epoll_wait
@@ -922,7 +922,7 @@ repoll:
             if( UNLIKELY(ctrl_fd_.is_wake_up()) ) {
                 // We have been waken up by the caller, just return empty
                 // NetState here
-                return NetState(0);
+                return NetState();
             }
         }
     } while( true );

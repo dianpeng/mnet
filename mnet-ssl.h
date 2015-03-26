@@ -35,6 +35,23 @@ public:
     }
 
 public:
+    Buffer& write_buffer() {
+        return write_buffer_;
+    }
+
+    Buffer& read_buffer() {
+        return read_buffer_;
+    }
+
+    const Buffer& write_buffer() const {
+        return write_buffer_;
+    }
+
+    const Buffer& read_buffer() const {
+        return read_buffer_;
+    }
+
+public:
     void OnRead( Socket* socket , std::size_t size , const NetState& ok );
     void OnWrite( Socket* socket, std::size_t size , const NetState& ok );
 
@@ -48,6 +65,10 @@ private:
         SSLStatus() : 
             io_return_code(0),
             ssl_error_code(0)
+        {}
+        SSLStatus( int ic , int sc ):
+            io_return_code(ic),
+            ssl_error_code(sc)
         {}
     };
 
@@ -66,7 +87,7 @@ private:
 
     Socket* socket_;
     SSL* ssl_;
-    BIO* read_bio_, *write_bio_;
+    BIO* ssl_bio_ , *out_bio_;
 
     bool eof_;
 };
@@ -74,3 +95,4 @@ private:
 
 } // namespace ment
 #endif // MNET_SSL_H_
+

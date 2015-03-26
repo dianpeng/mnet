@@ -401,7 +401,7 @@ std::size_t Socket::DoRead( NetState* ok ) {
                 return read_sz;
             }
         } else {
-            if( sz == 0 ) {
+            if( UNLIKELY(sz == 0) ) {
                 // We have seen an EOF flag, however for this user reading
                 // operations, we will not being able to do this, we set
                 // our socket flag to SEE_EOF , later on we can replay this

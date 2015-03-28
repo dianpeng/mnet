@@ -628,7 +628,7 @@ void Listener::OnReadNotify() {
     else {
         NetState accept_state;
 
-        int nfd =DoAccept(&accept_state);
+        int nfd = DoAccept(&accept_state);
         if( UNLIKELY(nfd < 0) ) {
             if( !accept_state ) {
                 DO_INVOKE( user_accept_callback_ ,

@@ -448,10 +448,13 @@ public:
         write_ptr_ = read_ptr_ = 0;
     }
 
-    void Reserve( std::size_t capacity ) {
+    bool Reserve( std::size_t capacity ) {
+        if( is_fixed_ )
+            return false;
         if( writable_size() < capacity ) {
             Grow( capacity - writable_size() );
         }
+        return true;
     }
 
 private:

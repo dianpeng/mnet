@@ -47,7 +47,27 @@ namespace {
 // Since we have no way to get how much encoded pending + unencoded pending 
 // buffer we can get from SSL, SSL doesn't know either without really parsing.
 static const int kSSLPacketLength = 1<<16; // 64 KB
-} // namespace 
+
+struct SSLGlobalLibrary {
+    SSL_CTX* ssl_context;
+};
+
+static SSLGlobalLibrary g_ssl_global_library;
+
+#define SSL_INITIALIZATION_CHECK() \
+    do { \
+        assert( g_ssl_global_library.ssl_context != NULL ); \
+    } while(0)
+
+
+
+}// namespace
+
+
+SSLSocket::SSLSocket( Socket* socket , SSL* ssl ) :
+    socket_(socket),
+    ssk_(ssl),
+    out_bio_( BIO_new( 
 
 bool SSLSocket::DoReadLoop( NetState* state ) {
     // Internally we may meet the situation that we need to write

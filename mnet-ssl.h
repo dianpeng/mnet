@@ -265,7 +265,6 @@ private:
 
 }// namespace detail
 
-
 bool InitializeSSLLibrary();
 
 // 
@@ -318,7 +317,7 @@ public:
 protected:
     // Please make sure to pass a valid socket here. Either a TCP socket that
     // has already been connected _or_ a socket that has been accepted .
-    SSLSocket( Socket* socket );
+    SSLSocket( Socket* socket , SSL* ssl );
 
     enum {
         SOCKET_READING = 0,

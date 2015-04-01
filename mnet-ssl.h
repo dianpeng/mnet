@@ -321,6 +321,11 @@ protected:
         return socket_;
     }
 
+    bool DoBufferSend( NetState* state );
+    bool MapPendingIOStatus( NetState* state , int ssl_return , bool write );
+    bool MapSSLError( NetState* state , int ssl_return );
+    void HandleUnderlyIONotify( const NetState& state );
+
 private:
     // These 2 functions will try their best to move the data from SSL to or from TCP layer.
     // If nothing needs to be pending, then it returns true , otherwise it returns false 
@@ -328,13 +333,11 @@ private:
     bool DoReadLoop( NetState* state );
     bool DoWriteLoop( NetState* state );
     bool DoCloseLoop( NetState* state );
-    bool DoBufferSend( NetState* state );
-    bool MapPendingIOStatus( NetState* state , int ssl_return , bool write );
-    bool MapSSLError( NetState* state , int ssl_return );
-    void HandleUnderlyIONotify( const NetState& state );
+    void CallCallback( const NetState& state );
     // This function will execute the pending io operation that is in the queue. Also
     bool ContinueSSL( NetState* state );
-    void CallCallback( const NetState& state );
+
+private:
 
     enum {
         SOCKET_ERROR_OR_CLOSE= -1,
@@ -351,7 +354,6 @@ private:
         WRITE_PENDING  // This operation means the SSL wants to write from underlying layer
     };
 
-private:
 
     // The general cases for each IO operation is invoke corresponding internal
     // buffer transmittion routine which will assign the pending io operation
@@ -472,7 +474,16 @@ public:
 
     template< typename T > 
     void AsyncConnect( T* notifier );
+    
+public:
+    // Handling socket event callback when we are in the SOCKET_DISCONNECTED 
+    // and SOCKET_CONNECTING stage. Once we move to states SOCKET_CNONNECTED,
+    // we are fallback to the parent's callback function for these 2 .
+    void OnRead( Socket* socket , std::size_t size , const NetState& state );
+    void OnWrite( Socket* socket , std::size_t size , const NetState& state );
 
+private:
+    bool DoConnect( NetState* state );
 
 private:
     enum {
@@ -480,8 +491,9 @@ private:
         SOCKET_DISCONNECTED,
         SOCKET_CONNECTING,
     };
-
     int state_ ;
+
+    detail::ScopePtr<detail::SSLConnectCallback> connect_callback_ `
 };
 
 

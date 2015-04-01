@@ -85,6 +85,8 @@ namespace state_category {
 static const int kSSL = 3;
 }
 
+namespace ssl {
+
 class SSLSocket;
 class SSLClientSocket;
 class SSLListener;
@@ -264,15 +266,14 @@ private:
 }// namespace detail
 
 
+bool InitializeSSLLibrary();
+
 // 
 // A possible SSL implementation on top of the async SSL layer.
 //
 class SSLSocket {
 public:
-
-    // Please make sure to pass a valid socket here. Either a TCP socket that
-    // has already been connected _or_ a socket that has been accepted .
-    SSLSocket( Socket* socket );
+    virtual ~SSLSocket();
 
     template< typename T >
     void AsyncRead( T* notifier );
@@ -315,37 +316,18 @@ public:
     void OnClose( const NetState& state );
 
 protected:
-
-    // Grab the underlying transport layer socket
-    Socket* underly_socket() const {
-        return socket_;
-    }
-
-    bool DoBufferSend( NetState* state );
-    bool MapPendingIOStatus( NetState* state , int ssl_return , bool write );
-    bool MapSSLError( NetState* state , int ssl_return );
-    void HandleUnderlyIONotify( const NetState& state );
-
-private:
-    // These 2 functions will try their best to move the data from SSL to or from TCP layer.
-    // If nothing needs to be pending, then it returns true , otherwise it returns false 
-    // which means user needs to issue the PENDING IO operations on underlying transport layer.
-    bool DoReadLoop( NetState* state );
-    bool DoWriteLoop( NetState* state );
-    bool DoCloseLoop( NetState* state );
-    void CallCallback( const NetState& state );
-    // This function will execute the pending io operation that is in the queue. Also
-    bool ContinueSSL( NetState* state );
-
-private:
+    // Please make sure to pass a valid socket here. Either a TCP socket that
+    // has already been connected _or_ a socket that has been accepted .
+    SSLSocket( Socket* socket );
 
     enum {
-        SOCKET_ERROR_OR_CLOSE= -1,
         SOCKET_READING = 0,
         SOCKET_WRITING = 1,
         SOCKET_CLOSING = 2,
         SOCKET_SSL_SHUTDOWN = 3,
-        SOCKET_NORMAL = 4
+        SOCKET_NORMAL = 4,
+        SOCKET_ERROR_OR_CLOSE= 5,
+        MAXIMUM_SSLSOCKET_STATES 
     };
 
     enum {
@@ -354,6 +336,25 @@ private:
         WRITE_PENDING  // This operation means the SSL wants to write from underlying layer
     };
 
+    // readonly attributes for inherited classes
+    int ssl_io_state() const {
+        return ssl_io_state_;
+    }
+
+    bool DoBufferSend( NetState* state );
+    bool MapPendingIOStatus( NetState* state , int ssl_return , bool write , bool eof );
+    bool MapSSLError( NetState* state , int ssl_return );
+    void HandleUnderlyIONotify( const NetState& state , std::size_t size );
+
+    virtual void CallCallback( const NetState& state );
+    // This function will execute the pending io operation that is in the queue. Also
+    virtual bool ContinueSSL( NetState* state );
+
+    // For inheritanace usage here
+    Socket* socket_;
+    SSL* ssl_;
+    BIO* out_bio_;
+    int state_;
 
     // The general cases for each IO operation is invoke corresponding internal
     // buffer transmittion routine which will assign the pending io operation
@@ -361,7 +362,14 @@ private:
     static const int kLocalPendingIO = 4;
 
     detail::EmbeddedQueue<kLocalPendingIO,int> pending_io_queue_;
-    
+
+private:
+    // These 2 functions will try their best to move the data from SSL to or from TCP layer.
+    // If nothing needs to be pending, then it returns true , otherwise it returns false 
+    // which means user needs to issue the PENDING IO operations on underlying transport layer.
+    bool DoReadLoop( NetState* state );
+    bool DoWriteLoop( NetState* state );
+    bool DoCloseLoop( NetState* state );
 
     Buffer read_buffer_, write_buffer_;
     int ssl_read_size_;
@@ -371,13 +379,7 @@ private:
     detail::ScopePtr<detail::SSLWriteCallback> write_callback_;
     detail::ScopePtr<detail::SSLCloseCallback> close_callback_;
 
-    Socket* socket_;
-    SSL* ssl_;
-    BIO* ssl_bio_ , *out_bio_;
-
-    int state_;
     int ssl_io_state_; // Internal state for tracking SSL state
-    bool eof_;
 };
 
 template< typename T >
@@ -467,38 +469,87 @@ void SSLSocket::AsyncSSLShutdown( T* notifier ) {
 // SSLClientSocket just allow async connection operation here
 class SSLClientSocket : public SSLSocket {
 public:
-
     // Please make sure to give a socket that has already connected to the
     // server. Otherwise the behavior is undefined here.
     SSLClientSocket( ClientSocket* socket );
+    virtual ~SSLClientSocket();
 
     template< typename T > 
     void AsyncConnect( T* notifier );
     
-public:
-    // Handling socket event callback when we are in the SOCKET_DISCONNECTED 
-    // and SOCKET_CONNECTING stage. Once we move to states SOCKET_CNONNECTED,
-    // we are fallback to the parent's callback function for these 2 .
-    void OnRead( Socket* socket , std::size_t size , const NetState& state );
-    void OnWrite( Socket* socket , std::size_t size , const NetState& state );
 
 private:
     bool DoConnect( NetState* state );
 
+    virtual void CallCallback( const NetState& state );
+    virtual bool ContinueSSL(  NetState* state );
+
 private:
     enum {
-        SOCKET_CONNECTED = 0,
-        SOCKET_DISCONNECTED,
-        SOCKET_CONNECTING,
+        SOCKET_DISCONNECTED = SSLSocket::MAXIMUM_SSLSOCKET_STATES + 1,
+        SOCKET_CONNECTING = SSLSocket::MAXIMUM_SSLSOCKET_STATES + 2,
+        MAXIMUM_SSLCLIENTSOCKET_STATES
     };
-    int state_ ;
 
-    detail::ScopePtr<detail::SSLConnectCallback> connect_callback_ `
+    detail::ScopePtr<detail::SSLConnectCallback> connect_callback_;
 };
 
+template< typename T >
+void SSLClientSocket::AsyncConnect( T* notifier ) {
+    NetState ok;
 
+    if( DoConnect(&ok) ) {
+        state_ = SOCKET_NORMAL;
+        notifier->OnConnect( this , ok );
+    } else {
+        if(!ok) {
+            state_ = SOCKET_ERROR_OR_CLOSE;
+            notifier->OnConnect(this,ok);
+        } else {
+            state_ = SOCKET_CONNECTING;
+        }
+    }
+}
 
+class SSLAcceptedSocket : public SSLSocket {
+public:
+    SSLAcceptedSocket( Socket* new_accepted_socket );
+    virtual ~SSLAcceptedSocket();
 
+    template< typename T >
+    void AsyncAccept( T* notifier );
+
+private:
+
+    virtual void CallCallback( const NetState& state );
+    virtual bool ContinueSSL( NetState* state );
+    bool DoAccept( NetState* state );
+
+private:
+    enum {
+        SOCKET_DISCONNECTED = SSLSocket::MAXIMUM_SSLSOCKET_STATES + 1,
+        SOCKET_DISCONNECTED = SSLSocket::MAXIMUM_SSLSOCKET_STATES + 2,
+        MAXIMUM_SSLACCEPTEDSOCKET_STATES
+    };
+
+    detail::ScopePtr<detail::SSLAcceptCallback> accept_callback_;
+};
+
+template< typename T > 
+void SSLAcceptedSocket::AsyncAccept( T* notifier ) {
+    NetState state;
+    if( DoAccept(&state) ) {
+        state_ = SOCKET_NORMAL;
+        notifier->OnAccept( this , state );
+    } else {
+        if(!state) {
+            state_ = SOCKET_ERROR_OR_CLOSE;
+            notifier->OnAccept( this, state );
+        } 
+    }
+}
+
+} // namespace ssl
 } // namespace ment
 #endif // MNET_SSL_H_
 

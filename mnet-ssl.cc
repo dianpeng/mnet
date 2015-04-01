@@ -38,6 +38,7 @@
     } while(false)
 
 namespace mnet {
+namespace ssl {
 namespace {
  
 // Current version of SSL only supports a 64kb packet (originally designed for
@@ -81,7 +82,7 @@ bool SSLSocket::DoReadLoop( NetState* state ) {
                 // check whether we really have some data that is pending in
                 // the user TCP socket buffer or not.
                 if( accessor.size() == writted_size ) {
-                    return MapPendingIOStatus( state , err , write );
+                    return MapPendingIOStatus( state , err , write , false );
                 }
             } else if( err == SSL_ERROR_WANT_WRITE ) {
                 // This means the write attempts of SSL has been blocked by
@@ -92,7 +93,7 @@ bool SSLSocket::DoReadLoop( NetState* state ) {
                     return false;
                 // Try SSL operation again 
             } else {
-                return MapPendingIOStatus( state , err, write );
+                return MapPendingIOStatus( state , err, write , false );
             }
 
         } else {
@@ -101,14 +102,14 @@ bool SSLSocket::DoReadLoop( NetState* state ) {
                 // No matter it is a unclean close or a clean close
                 // we just tell user that we are done here .
                 ssl_read_size_ += ssl_return;
-                return MapPendingIOStatus( state, SSL_ERROR_ZERO_RETURN , write );
+                return MapPendingIOStatus( state, SSL_get_error(ssl_,0) , write , true );
             } else {
                 ssl_read_size_ += ssl_return;
                 if( !read_buffer_.Inject( buffer , ssl_return ) ) {
                     *state = NetState( state_category::kSystem , ENOBUFS );
                     return false;
                 }
-                return MapPendingIOStatus( state, SSL_ERROR_NONE , write );
+                return MapPendingIOStatus( state, SSL_ERROR_NONE , write , false );
             }
         }
     } while(true); 
@@ -138,9 +139,11 @@ bool SSLSocket::DoWriteLoop( NetState* state ){
         
         // Handle ssl return value here
         if( ssl_return < 0 ) {
-            if( ssl_return != SSL_ERROR_WANT_WRITE ) {
+            int ssl_err = SSL_get_error(ssl_,ssl_return);
+
+            if( ssl_err!= SSL_ERROR_WANT_WRITE ) {
                 ssl_write_size_ += writted_size;
-                return MapPendingIOStatus( state , ssl_return , write );
+                return MapPendingIOStatus( state , ssl_err , write , false );
             }
             // For SSL_ERROR_WANT_WRITE we can try again since it is most
             // likely that the underlying BIO is fulled .
@@ -149,14 +152,14 @@ bool SSLSocket::DoWriteLoop( NetState* state ){
                 ssl_write_size_ += writted_size;
                 // Meet EOF, again, we don't try to distinguish a clean close
                 // or an unexpected close here.
-                return MapPendingIOStatus( state , SSL_ERROR_ZERO_RETURN , write );
+                return MapPendingIOStatus( state , SSL_get_error(ssl_,0) , write , true );
             } else {
                 ssl_write_size_ += writted_size;
                 accessor.set_committed_size( writted_size );
                 // Check whether we have finished the entire buffer or not
                 if( static_cast<std::size_t>(writted_size) == accessor.size() ) {
                     ssl_write_size_ += ssl_return;
-                    return MapPendingIOStatus( state , SSL_ERROR_NONE  , write );
+                    return MapPendingIOStatus( state , SSL_ERROR_NONE  , write , false );
                 }
             }
         }
@@ -179,7 +182,7 @@ bool SSLSocket::DoCloseLoop( NetState* state ) {
             // This means we have written some data underlying to the BIO and now
             // we can continue to our closing phases there.
             assert( BIO_pending( out_bio_ ) != 0 );
-            return MapPendingIOStatus( state , SSL_ERROR_NONE , true );
+            return MapPendingIOStatus( state , SSL_ERROR_NONE , true , false );
         } else {
             // Now we have something we don't expect here. It could be an IO 
             int ssl_err = SSL_get_error( ssl_ , ssl_return );
@@ -205,13 +208,13 @@ bool SSLSocket::DoCloseLoop( NetState* state ) {
                         return true;
                     else {
                         assert( BIO_pending( out_bio_ ) != 0 );
-                        return MapPendingIOStatus( state, SSL_ERROR_NONE , true );
+                        return MapPendingIOStatus( state, SSL_ERROR_NONE , true , false );
                     }
                 }
             } else {
                 // This is the error we are not able to handle here so
                 // we just let our MapPendingIOStatus to handle them 
-                return MapPendingIOStatus( state, ssl_return, false );
+                return MapPendingIOStatus( state, ssl_return, false , false );
             }
         }
     }
@@ -236,7 +239,8 @@ bool SSLSocket::DoBufferSend( NetState* state ) {
     }
 }
 
-bool SSLSocket::MapPendingIOStatus( NetState* state , int ssl_return , bool write ) {
+bool SSLSocket::MapPendingIOStatus( NetState* state , int ssl_return , 
+        bool write , bool eof ) {
     bool ret; 
 
     if( BIO_pending( out_bio_ ) != 0 ) {
@@ -251,6 +255,17 @@ bool SSLSocket::MapPendingIOStatus( NetState* state , int ssl_return , bool writ
 
     if( write ) {
         pending_io_queue_.Enqueue( WRITE_PENDING );
+    }
+    
+    if( eof ) {
+        if( ssl_return != SSL_ERROR_ZERO_RETURN ) {
+            state_ = SOCKET_ERROR_OR_CLOSE;
+            *state = NetState( state_category::kSSL , SSL_ERROR_SSL );
+            return true;
+        } else {
+            state_ = SOCKET_ERROR_OR_CLOSE;
+            return true;
+        }
     }
 
     switch( ssl_return ) {
@@ -270,10 +285,6 @@ bool SSLSocket::MapPendingIOStatus( NetState* state , int ssl_return , bool writ
             break;
         case SSL_ERROR_WANT_WRITE:
             ret = false;
-            break;
-        case SSL_ERROR_ZERO_RETURN:
-            eof_ = true;
-            ret = true;
             break;
         default:
             // Handle other error stuffs
@@ -323,6 +334,10 @@ bool SSLSocket::ContinueSSL( NetState* state ) {
                 if( !DoCloseLoop(state) )
                     return false;
                 break;
+            default:
+                // Unknown socket status , maybe our inherited class wants to
+                // handle them, so just return false here .
+                return false;
         }
     } else {
         pending_io_queue_.Dequeue();
@@ -335,7 +350,7 @@ bool SSLSocket::ContinueSSL( NetState* state ) {
     UNREACHABLE( return false );
 }
 
-void SSLSocket::HandleUnderlyIONotify( const NetState& state ) {
+void SSLSocket::HandleUnderlyIONotify( const NetState& state , std::size_t size ) {
     if( UNLIKELY( state_ == SOCKET_ERROR_OR_CLOSE || state_ == SOCKET_NORMAL ) )        
         return;
 
@@ -347,10 +362,15 @@ void SSLSocket::HandleUnderlyIONotify( const NetState& state ) {
         // last IO is not pending _or_ we tell user now . We choose invoke user's cb
         // function now and mark that this socket needs to be cancled for all the other
         // stuff.
+        
         state_ = SOCKET_ERROR_OR_CLOSE;
         pending_io_queue_.Clear();
         CallCallback(state);
     } else {
+        if( size == 0 ) {
+            BIO_shutdown_wr( out_bio_ );
+            BIO_shutdown_wr( SSL_get_wbio(ssl_) );
+        } 
         // Try to feed SSL state machine again
         NetState ok;
         if( ContinueSSL( &ok ) ) {
@@ -366,13 +386,13 @@ void SSLSocket::HandleUnderlyIONotify( const NetState& state ) {
 void SSLSocket::OnRead( Socket* socket , std::size_t size , const NetState& ok ) {
     UNUSED_ARG(socket);
     UNUSED_ARG(size);
-    HandleUnderlyIONotify(ok);
+    HandleUnderlyIONotify(ok,size);
 }
 
 void SSLSocket::OnWrite( Socket* socket , std::size_t size , const NetState& ok ) {
     UNUSED_ARG(socket);
     UNUSED_ARG(size);
-    HandleUnderlyIONotify(ok);
+    HandleUnderlyIONotify(ok,size);
 }
 
 void SSLSocket::CallCallback( const NetState& state ) {
@@ -381,8 +401,14 @@ void SSLSocket::CallCallback( const NetState& state ) {
     switch( ssl_io_state_ ) {
         case SOCKET_READING:
             assert( pending_io_queue_.empty() );
-            state_ = SOCKET_NORMAL;
-            io_size = ssl_read_size_ ;
+            if( UNLIKELY(!state) ) {
+                state_ = SOCKET_ERROR_OR_CLOSE;
+                io_size = 0;
+            } else {
+                state_ = SOCKET_NORMAL;
+                io_size = ssl_read_size_ ;
+            }
+
             ssl_read_size_ = 0;
 
             DO_INVOKE( read_callback_,
@@ -393,8 +419,14 @@ void SSLSocket::CallCallback( const NetState& state ) {
             return;
         case SOCKET_WRITING:
             assert( pending_io_queue_.empty() );
-            state_ = SOCKET_NORMAL;
-            io_size = ssl_write_size_;
+            if( UNLIKELY(!state) ) {
+                state_ = SOCKET_ERROR_OR_CLOSE;
+                io_size = 0 ;
+            } else {
+                state_ = SOCKET_NORMAL;
+                io_size = ssl_write_size_;
+            }
+
             ssl_write_size_ = 0;
 
             DO_INVOKE( write_callback_,
@@ -438,35 +470,146 @@ void SSLSocket::OnClose( const NetState& state ) {
 }
 
 
+// DoConnect operation will still hung around the SSL_connect return
+// value if underlying IO cannot be satisified there.
+bool SSLClientSocket::DoConnect( NetState* state ) {
+    bool write = false;
+    do {
+        int ssl_return = SSL_connect( ssl_ ) ;
+        if( UNLIKELY(ssl_return == 0) ) {
+            return MapPendingIOStatus( state , SSL_get_error(ssl_,ssl_return) , write , true );
+        } else {
+            if( UNLIKELY(ssl_return < 0) ) {
+                int ssl_err = SSL_get_error( ssl_, ssl_return );
+                if( ssl_err == SSL_ERROR_WANT_WRITE ) {
+                    assert( BIO_pending( out_bio_ ) != 0 );
+                    if( !DoBufferSend(state) )
+                        return true;
+                    write = true;
+                    continue;
+                } else {
+                    return MapPendingIOStatus( state , 
+                            ssl_err,
+                            write,
+                            true );
+                }
+            } else {
+                assert( ssl_return == 1 );
+                assert( SSL_is_init_finished(ssl_) );
+                return true;
+            }
+        }
+    } while( true );
+    UNREACHABLE( return false );
+}
 
+void SSLClientSocket::CallCallback( const NetState& state ) {
+    // We try to check whether we can handle this callback function
+    // otherwise we just let the CallCallback function in base class
+    // to handle this situations.
+    if( state_ == SOCKET_CONNECTING ) {
+        if( LIKELY(state) ) {
+            state_ = SOCKET_NORMAL;
+        } else {
+            state_ = SOCKET_ERROR_OR_CLOSE;
+        }
+
+        DO_INVOKE( connect_callback_,
+                detail::ScopePtr< detail::SSLConnectCallback > ,
+                this,
+                state );
+    } else {
+        SSLSocket::CallCallback(state);
+    }
+}
+
+bool SSLClientSocket::ContinueSSL( NetState* state ) {
+    if( state_ == SOCKET_CONNECTING ) {
+        assert( pending_io_queue_.Front() == READ_PENDING ||
+                pending_io_queue_.Front() == WRITE_PENDING );
+        if( pending_io_queue_.Front() == READ_PENDING ) {
+            pending_io_queue_.Dequeue();
+            if(!DoConnect(state))
+                return false;
+        } else {
+            pending_io_queue_.Dequeue();
+        }
+        // Check pending io queue is empty or not, if empty, 
+        // we can fire user's callback function there
+        if( pending_io_queue_.empty() )
+            return true;
+
+    } else {
+        return SSLSocket::ContinueSSL( state );
+    }
+    UNREACHABLE( return false );
+}
+
+void SSLAcceptedSocket::CallCallback( const NetState& state ) {
+    // We don't need to notify the BASE class here since this server socket
+    // will only be used to accept incomming traffic. Therefore, just do accept
+    // are fine here.
+    if( UNLIKELY(!state) ) {
+        state_ = SOCKET_DISCONNECTED;
+    } else {
+        state_ = SOCKET_NORMAL;
+    }
+
+    DO_INVOKE( accept_callback_,
+            detail::ScopePtr<detail::SSLAcceptCallback>,
+            this,
+            state );
+}
+
+bool SSLAcceptedSocket::ContinueSSL( NetState* state ) {
+    assert( pending_io_queue_.Front() == READ_PENDING ||
+            pending_io_queue_.Front() == WRITE_PENDING );
+
+    if( pending_io_queue_.Front() == READ_PENDING ) {
+        pending_io_queue_.Dequeue();
+        if(!DoAccept(state))
+            return false;
+    } else {
+        pending_io_queue_.Dequeue();
+    }
+
+    if( pending_io_queue_.empty() )
+        return true;
+    UNREACHABLE( return false );
+}
+
+bool SSLAcceptedSocket::DoAccept( NetState* state ) {
+    bool write = false;
+    do {
+        int ssl_return = SSL_accept( ssl_ );
+        // checking return and do the corresponding IO operations here
+        if( UNLIKELY(ssl_return < 0) ) {
+            int ssl_err = SSL_get_error( ssl_ , ssl_return );
+            if( ssl_err == SSL_ERROR_WANT_WRITE ) {
+                assert( BIO_pending( out_bio_ ) != 0 );
+                if( !DoBufferSend(state) )
+                    return false;
+                write = true;
+            } else {
+                return MapPendingIOStatus( state ,
+                        ssl_err , 
+                        write ,
+                        false );
+            }
+        } else {
+            if( UNLIKELY(ssl_return == 0) ) {
+                return MapPendingIOStatus( state ,
+                        SSL_get_error( ssl_ , 0 ),
+                        write ,
+                        true );
+            } else {
+                return true;
+            }
+        }
+    } while( true );
+    UNREACHABLE( return false );
+}
+
+}// namespace ssl
 }// namespace mnet
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 

@@ -92,7 +92,7 @@ int CreateTcpFileDescriptor() {
     return fd;
 }
 
-int CreateTcpListenerFileDescriptor() {
+int CreateTcpServerSocketFileDescriptor() {
     int fd = NewFileDescriptor();
     if( UNLIKELY(fd < 0) )
         return -1;
@@ -549,10 +549,10 @@ void ClientSocket::OnException( const NetState& state ) {
     }
 }
 
-bool Listener::Bind( const Endpoint& endpoint ) {
+bool ServerSocket::Bind( const Endpoint& endpoint ) {
     assert( is_bind_ == false );
     // Setting up the listener file descriptors
-    int sock_fd = detail::CreateTcpListenerFileDescriptor();
+    int sock_fd = detail::CreateTcpServerSocketFileDescriptor();
     if( UNLIKELY(sock_fd < 0) ) {
         return false;
     }
@@ -587,7 +587,7 @@ bool Listener::Bind( const Endpoint& endpoint ) {
     return true;
 }
 
-void Listener::HandleRunOutOfFD( int err ) {
+void ServerSocket::HandleRunOutOfFD( int err ) {
     // Handling the run out of file descriptors error here, if we
     // don't kernel will not free any resource but continue bothering
     // us for this problem.
@@ -603,7 +603,7 @@ void Listener::HandleRunOutOfFD( int err ) {
     UNREACHABLE(return);
 }
 
-int Listener::DoAccept( NetState* state ) {
+int ServerSocket::DoAccept( NetState* state ) {
     assert( can_read() );
     int nfd = ::accept4( fd() , NULL , NULL , O_CLOEXEC | O_NONBLOCK );
     if( UNLIKELY(nfd < 0) ) {
@@ -620,7 +620,7 @@ int Listener::DoAccept( NetState* state ) {
     }
 }
 
-void Listener::OnReadNotify() {
+void ServerSocket::OnReadNotify() {
     assert( is_bind_ );
     set_can_read( true );
     if( UNLIKELY(user_accept_callback_.IsNull()) )
@@ -653,7 +653,7 @@ void Listener::OnReadNotify() {
     }
 }
 
-void Listener::OnException( const NetState& state ) {
+void ServerSocket::OnException( const NetState& state ) {
     HandleRunOutOfFD( state.error_code() );
     // We have an exception on the listener socket file descriptor
     if( !user_accept_callback_.IsNull() ) {
@@ -663,7 +663,12 @@ void Listener::OnException( const NetState& state ) {
     }
 }
 
-Listener::Listener() :
+void ServerSocket::SetIOManager( IOManager* io_manager ) {
+    io_manager_ = io_manager;
+    io_manager->WatchRead( this );
+}
+
+ServerSocket::ServerSocket() :
     new_accept_socket_(NULL),
     io_manager_(NULL),
     is_bind_( false )
@@ -673,7 +678,7 @@ Listener::Listener() :
     VERIFY( dummy_fd_ >= 0 );
 }
 
-Listener::~Listener() {
+ServerSocket::~ServerSocket() {
     // Closing the listen fd
     VERIFY( ::close(fd()) == 0 );
     set_fd(-1);

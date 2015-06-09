@@ -9,7 +9,6 @@
 #include <sys/time.h>
 #include <netinet/tcp.h>
 
-
 // The DO_INVOKE macro is a trick to help resolve the problem of that
 // during the user callback it register a new handler. However if we
 // remove the current handler this will remove the newly registered
@@ -23,9 +22,6 @@
     } while(false)
 
 
-#ifndef NDEBUG
-#define VERIFY assert
-#else
 #define VERIFY(cond) \
     do { \
         if(!(cond)) { \
@@ -33,8 +29,6 @@
             std::abort(); \
         } \
     } while(0)
-#endif // NDEBUG
-
 
 
 namespace mnet {
@@ -92,7 +86,7 @@ int CreateTcpFileDescriptor() {
     return fd;
 }
 
-int CreateTcpListenerFileDescriptor() {
+int CreateTcpServerSocketFileDescriptor() {
     int fd = NewFileDescriptor();
     if( UNLIKELY(fd < 0) )
         return -1;
@@ -365,7 +359,7 @@ std::size_t Socket::DoRead( NetState* ok ) {
     if( UNLIKELY(eof_) ) {
         return 0;
     }
-
+    
     do {
         // Using a loop to force us run into the EAGAIN/EWOULDBLOCK
 
@@ -409,30 +403,35 @@ std::size_t Socket::DoRead( NetState* ok ) {
                 eof_ = true;
                 return read_sz;
             } else {
-                if( static_cast<std::size_t>(sz) <= accessor.size() ) {
+                const std::size_t accessor_sz = accessor.size();
+
+                if( static_cast<std::size_t>(sz) <= accessor_sz ) {
                     accessor.set_committed_size( sz );
                 } else {
                     // The kernel has written data into the second stack buffer
                     // now we need to grow our buffer by using write operations
-                    accessor.set_committed_size( accessor.size() );
+                    accessor.set_committed_size( accessor_sz );
                     accessor.Commit();
 
                     // Inject the data into the buffer, this injection will not
                     // cause buffer overhead since they just write the data without
                     // preallocation
-                    if( !read_buffer().Inject( stk , sz-accessor.size() ) ) {
+                    if( !read_buffer().Inject( stk , sz-accessor_sz ) ) {
                         *ok = NetState(state_category::kSystem,ENOBUFS);
                         return read_sz;
                     }
                 }
                 read_sz += sz;
 
-                // Continue the loop although we know that there will be no pending
-                // data
-                continue;
+                if( static_cast<std::size_t>(sz) < k64K + accessor_sz ) {
+                    set_can_read(false);
+                    return read_sz;
+                } else {
+                    continue;
+                }
             }
         }
-    } while(true);
+    } while(true); 
 }
 
 std::size_t Socket::DoWrite( NetState* ok ) {
@@ -453,7 +452,6 @@ std::size_t Socket::DoWrite( NetState* ok ) {
         if( LIKELY(errno == EAGAIN || errno == EWOULDBLOCK) ) {
             // This is a partial operation, we need to wait until epoll_wait
             // to wake me up
-            prev_write_size_ += sz;
             set_can_write(false);
             return 0;
         } else {
@@ -464,6 +462,9 @@ std::size_t Socket::DoWrite( NetState* ok ) {
         }
     } else {
         // Set up the committed size
+        if( static_cast<std::size_t>(sz) < accessor.size() ) {
+            set_can_write(false);
+        }
         accessor.set_committed_size( static_cast<std::size_t>(sz) );
         return static_cast<std::size_t>(sz);
     }
@@ -549,10 +550,10 @@ void ClientSocket::OnException( const NetState& state ) {
     }
 }
 
-bool Listener::Bind( const Endpoint& endpoint ) {
+bool ServerSocket::Bind( const Endpoint& endpoint ) {
     assert( is_bind_ == false );
     // Setting up the listener file descriptors
-    int sock_fd = detail::CreateTcpListenerFileDescriptor();
+    int sock_fd = detail::CreateTcpServerSocketFileDescriptor();
     if( UNLIKELY(sock_fd < 0) ) {
         return false;
     }
@@ -587,23 +588,27 @@ bool Listener::Bind( const Endpoint& endpoint ) {
     return true;
 }
 
-void Listener::HandleRunOutOfFD( int err ) {
+void ServerSocket::HandleRunOutOfFD( int err ) {
     // Handling the run out of file descriptors error here, if we
     // don't kernel will not free any resource but continue bothering
     // us for this problem.
     switch( err ) {
         case EMFILE:
-        case ENFILE:
+        case ENFILE: {
+            int f;
             // Run out the file descriptors and gracefully shutdown the peer side
             VERIFY( ::close( dummy_fd_ ) == 0 );
-            VERIFY( ::close( ::accept(fd(), NULL , NULL ) ) == 0 );
+            f = ::accept(fd(),NULL,NULL);
+            if( f > 0 )
+                VERIFY( ::close( f ) == 0 );
             VERIFY( (dummy_fd_ = ::open("/dev/null",O_RDONLY)) >= 0 );
+        } 
         default: return;
     }
     UNREACHABLE(return);
 }
 
-int Listener::DoAccept( NetState* state ) {
+int ServerSocket::DoAccept( NetState* state ) {
     assert( can_read() );
     int nfd = ::accept4( fd() , NULL , NULL , O_CLOEXEC | O_NONBLOCK );
     if( UNLIKELY(nfd < 0) ) {
@@ -611,8 +616,12 @@ int Listener::DoAccept( NetState* state ) {
             set_can_read(false);
             return -1;
         } else {
-            HandleRunOutOfFD( errno );
-            state->CheckPoint(state_category::kSystem,errno);
+            int err = errno;
+            HandleRunOutOfFD( err );
+            state->CheckPoint(state_category::kSystem,err);
+            if( errno == EAGAIN || errno == EWOULDBLOCK ) {
+                set_can_read(false);
+            }
             return -1;
         }
     } else {
@@ -620,7 +629,7 @@ int Listener::DoAccept( NetState* state ) {
     }
 }
 
-void Listener::OnReadNotify() {
+void ServerSocket::OnReadNotify() {
     assert( is_bind_ );
     set_can_read( true );
     if( UNLIKELY(user_accept_callback_.IsNull()) )
@@ -653,7 +662,7 @@ void Listener::OnReadNotify() {
     }
 }
 
-void Listener::OnException( const NetState& state ) {
+void ServerSocket::OnException( const NetState& state ) {
     HandleRunOutOfFD( state.error_code() );
     // We have an exception on the listener socket file descriptor
     if( !user_accept_callback_.IsNull() ) {
@@ -663,7 +672,7 @@ void Listener::OnException( const NetState& state ) {
     }
 }
 
-Listener::Listener() :
+ServerSocket::ServerSocket() :
     new_accept_socket_(NULL),
     io_manager_(NULL),
     is_bind_( false )
@@ -673,7 +682,7 @@ Listener::Listener() :
     VERIFY( dummy_fd_ >= 0 );
 }
 
-Listener::~Listener() {
+ServerSocket::~ServerSocket() {
     // Closing the listen fd
     VERIFY( ::close(fd()) == 0 );
     set_fd(-1);
@@ -767,10 +776,11 @@ void IOManager::WatchRead( detail::Pollable* pollable ) {
     ev.data.ptr = pollable;
 
     // Edge trigger for read
-    ev.events = EPOLLIN | EPOLLET;
+    ev.events = EPOLLIN | EPOLLET ;
 
     if( UNLIKELY(pollable->is_epoll_write_) ) {
         op = EPOLL_CTL_MOD;
+        ev.events |= EPOLLOUT;
     } else {
         op = EPOLL_CTL_ADD;
     }
@@ -791,10 +801,11 @@ void IOManager::WatchWrite( detail::Pollable* pollable ) {
     int op;
 
     ev.data.ptr = pollable;
-    ev.events = EPOLLOUT | EPOLLET;
+    ev.events = EPOLLOUT | EPOLLET ;
 
     if( UNLIKELY(pollable->is_epoll_read_) ) {
         op = EPOLL_CTL_MOD;
+        ev.events |= EPOLLIN;
     } else {
         op = EPOLL_CTL_ADD;
     }

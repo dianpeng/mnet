@@ -61,7 +61,7 @@ class NetState;
 
 class Socket;
 class ClientSocket;
-class Listener;
+class ServerSocket;
 class IOManager;
 
 namespace detail {
@@ -305,7 +305,7 @@ int CreateTcpFileDescriptor();
 
 // Create a tcp server file descriptor. This creation will not set up communication
 // attributes like NO_DELAY
-int CreateTcpListenerFileDescriptor();
+int CreateTcpServerSocketFileDescriptor();
 
 
 
@@ -745,14 +745,14 @@ private:
     bool can_write_;
 
     friend class ::mnet::IOManager;
-    friend class ::mnet::Listener;
+    friend class ::mnet::ServerSocket;
 };
 
 }// namespace detail
 
 // Socket represents a communication socket. It can be a socket that is accepted
 // or a socket that initialized by connect. However, for listening, the user should
-// use Listener. This socket will be added into the epoll fd using edge trigger.
+// use ServerSocket. This socket will be added into the epoll fd using edge trigger.
 
 class Socket : public detail::Pollable {
 public:
@@ -889,17 +889,20 @@ private:
     DISALLOW_COPY_AND_ASSIGN(ClientSocket);
 };
 
-// Listener class represents the class that is sololy for listening. This one will
+// ServerSocket class represents the class that is sololy for listening. This one will
 // be added into the epoll fd by level trigger. This is specifically needed if we
 // want to loop through different epoll set and allow level trigger just make code
 // simpler
-class Listener : public detail::Pollable {
+class ServerSocket : public detail::Pollable {
 public:
-    Listener();
+    ServerSocket();
 
-    ~Listener();
+    ~ServerSocket();
 
-    // Binding the Listener to a speicific end point and start
+    // Set the underlying IOManager 
+    inline void SetIOManager( IOManager* io_manager );
+
+    // Binding the ServerSocket to a speicific end point and start
     // to listen. (This function is equavlent for bind + listen)
     bool Bind( const Endpoint& ep );
 
@@ -918,7 +921,7 @@ private:
 
     virtual void OnReadNotify( );
     virtual void OnWriteNotify( ) {
-        // We will never register write notification for Listener
+        // We will never register write notification for ServerSocket
         UNREACHABLE(return);
     }
     virtual void OnException( const NetState& state );
@@ -948,7 +951,7 @@ private:
     bool is_bind_;
 
     friend class IOManager;
-    DISALLOW_COPY_AND_ASSIGN(Listener);
+    DISALLOW_COPY_AND_ASSIGN(ServerSocket);
 };
 
 // IOManager class represents the reactor. It performs socket event notification
@@ -973,12 +976,6 @@ public:
     template< typename T >
     void Schedule( int msec , T* notifier );
 
-    // This one is specifically for listener stuff
-    void SetListener( Listener* l ) {
-        l->set_io_manager(this);
-        WatchRead(l);
-    }
-
     // Calling this function will BLOCK the IOManager into the main loop
     NetState RunMainLoop();
 
@@ -989,7 +986,7 @@ public:
 
 private:
 
-    // The following interface is privately used by Socket/Listener/Connector class
+    // The following interface is privately used by Socket/ServerSocket/Connector class
     void WatchRead( detail::Pollable* pollable );
     void WatchWrite( detail::Pollable* pollable );
 
@@ -1091,7 +1088,7 @@ private:
     // API to watch the event notification.
 
     friend class Socket;
-    friend class Listener;
+    friend class ServerSocket;
     friend class ClientSocket;
 
     DISALLOW_COPY_AND_ASSIGN(IOManager);
@@ -1111,7 +1108,8 @@ void Socket::AsyncRead( T* notifier ) {
         if( UNLIKELY(eof_) ) {
             // This socket has been shutdown before previous DoRead 
             // operation. We just call user notifier here
-            notifier->OnRead( this, 0 , NetState(0) );
+            notifier->OnRead( this, 0 , NetState( 
+                        state_category::kSystem , 0) );
             return;
         } else {
             // We can directly read data from the kernel space
@@ -1121,7 +1119,8 @@ void Socket::AsyncRead( T* notifier ) {
             if( UNLIKELY(state) ) {
                 if( sz > 0 ) {
                     // Notify user that we have something for you.
-                    notifier->OnRead( this , sz , NetState(0) );
+                    notifier->OnRead( this , sz , NetState(
+                                state_category::kSystem, 0) );
                     return;
                 }
             } else {
@@ -1218,7 +1217,8 @@ void ClientSocket::AsyncConnect( const Endpoint& endpoint , T* notifier ) {
         // connect to a local host then kernel just succeeded at once
         // This typically happenes on FreeBSD.
         // Now just call user's callback function directly
-        notifier->OnConnect( this , NetState(0) );
+        notifier->OnConnect( this , NetState(
+                    state_category::kSystem, 0) );
         state_ = CONNECTED;
     } else {
         if ( UNLIKELY(errno != EINPROGRESS) ) {
@@ -1241,7 +1241,7 @@ void ClientSocket::AsyncConnect( const Endpoint& endpoint , T* notifier ) {
 }
 
 template< typename T >
-void Listener::AsyncAccept( Socket* socket , T* notifier ) {
+void ServerSocket::AsyncAccept( Socket* socket , T* notifier ) {
     assert( user_accept_callback_.IsNull() );
     assert( io_manager_ != NULL );
 
@@ -1272,6 +1272,11 @@ void Listener::AsyncAccept( Socket* socket , T* notifier ) {
     new_accept_socket_ = socket;
 
     return;
+}
+
+inline void ServerSocket::SetIOManager( mnet::IOManager* io_manager ) {
+        io_manager_ = io_manager;
+        io_manager->WatchRead( this );
 }
 
 template< typename T >

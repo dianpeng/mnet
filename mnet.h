@@ -664,6 +664,7 @@ class Pollable {
 public:
     Pollable() :
         fd_(-1),
+        notify_flag_( NULL ) ,
         is_epoll_read_( false ),
         is_epoll_write_( false ),
         can_read_( false ),
@@ -675,6 +676,12 @@ public:
         // fd MUST be recalimed. It means the fd_ must be
         // already set to invalid socket handler value
         assert( fd_ < 0 );
+
+        // Using notify flag to tell the watcher that this
+        // object has already gets deleted since its dtor
+        // has been invoked now
+        if( notify_flag_ != NULL ) 
+            *notify_flag_ = true;
     }
 
     // Accessor(readonly) for internal states of Socket
@@ -728,9 +735,20 @@ protected:
         can_read_ = c;
     }
 
+    void set_notify_flag( bool* flag ) {
+        notify_flag_ = flag;
+    }
+
 private:
     // File descriptors
     int fd_;
+
+    // A Hack to get notification whether this object
+    // gets deleted or not. This is a must since we
+    // need to get information whether user has deleted
+    // this object during the callback function or not
+    bool* notify_flag_;
+
     // If this fd has been added to epoll as epoll_read
     bool is_epoll_read_ ;
 

@@ -283,18 +283,26 @@ void Socket::OnReadNotify( ) {
                 } else {
                     // Checking whether we hit eof during the last read
                     if( eof_ ) {
+                        bool deleted = false;
+                        set_notify_flag( &deleted );
                         detail::ScopePtr<detail::CloseCallback> cb( user_close_callback_.Release() );
                         cb->InvokeClose(NetState());
-                        Close();
-                        state_ = CLOSED;
+                        if( !deleted ) {
+                            Close();
+                            state_ = CLOSED;
+                        }
                     }
                 }
             } else {
+                bool deleted = false;
+                set_notify_flag( &deleted );
                 // We failed here, so we just go straitforward to issue an
                 // Close operation on the notifier and close the underlying socket
                 user_close_callback_->InvokeClose(state);
-                Close();
-                state_ = CLOSED;
+                if( !deleted ) {
+                    Close();
+                    state_ = CLOSED;
+                }
             }
         }
     }
@@ -331,18 +339,22 @@ void Socket::OnWriteNotify( ) {
 
 void Socket::OnException( const NetState& state ) {
     assert( !state );
+    bool deleted = false;
+    set_notify_flag( &deleted );
+
     if( LIKELY(!user_read_callback_.IsNull()) ) {
         DO_INVOKE(user_read_callback_,
                   detail::ScopePtr<detail::ReadCallback>,
                   this,0,state);
     }
-    if( LIKELY(!user_write_callback_.IsNull()) ) {
-        DO_INVOKE(user_write_callback_,
-                  detail::ScopePtr<detail::WriteCallback>,
-                  this,0,state);
+    if( !deleted ) {
+        if( LIKELY(!user_write_callback_.IsNull()) ) {
+            DO_INVOKE(user_write_callback_,
+                    detail::ScopePtr<detail::WriteCallback>,
+                    this,0,state);
+        }
     }
 }
-
 
 std::size_t Socket::DoRead( NetState* ok ) {
     static const std::size_t k64K = 1<<16;
@@ -846,15 +858,19 @@ void IOManager::DispatchLoop( const struct epoll_event* event_queue , std::size_
         }
 
         // IN/OUT events
+        bool deleted = false;
+        p->set_notify_flag( &deleted );
+
         if( LIKELY(event_queue[i].events & EPOLLIN) ) {
             p->OnReadNotify();
             ev &= ~EPOLLIN;
         }
+
         if( LIKELY(event_queue[i].events & EPOLLOUT) ) {
-            p->OnWriteNotify();
+            if( !deleted ) 
+                p->OnWriteNotify();
             ev &= ~EPOLLOUT;
         }
-
         // We may somehow have unwatched event here.
         // We can log them for debuggin or other stuff
         VERIFY( ev == 0 );

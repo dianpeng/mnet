@@ -357,11 +357,9 @@ void Socket::OnException( const NetState& state ) {
 }
 
 std::size_t Socket::DoRead( NetState* ok ) {
-    static const std::size_t k64K = 1<<16;
     // Whenevenr this function gets called, we need to look into the
     // kernel since this means that user wants data.
     struct iovec buf[2];
-    char stk[k64K]; // 64KB is the one possible maxmimum IPV4 packet
     std::size_t read_sz = 0;
     // Clear the NetState structure
     ok->Clear();
@@ -389,8 +387,8 @@ std::size_t Socket::DoRead( NetState* ok ) {
         buf[0].iov_len = accessor.size();
 
         // Setting up the stack iovec component
-        buf[1].iov_base = stk;
-        buf[1].iov_len = k64K;
+        buf[1].iov_base = io_manager_->swap_buffer_;
+        buf[1].iov_len = io_manager_->swap_buffer_size_;
 
         // Start to read
         ssize_t sz = ::readv( fd() , buf , 2 );
@@ -428,14 +426,14 @@ std::size_t Socket::DoRead( NetState* ok ) {
                     // Inject the data into the buffer, this injection will not
                     // cause buffer overhead since they just write the data without
                     // preallocation
-                    if( !read_buffer().Inject( stk , sz-accessor_sz ) ) {
+                    if( !read_buffer().Inject( io_manager_->swap_buffer_ , sz-accessor_sz ) ) {
                         *ok = NetState(state_category::kSystem,ENOBUFS);
                         return read_sz;
                     }
                 }
                 read_sz += sz;
 
-                if( static_cast<std::size_t>(sz) < k64K + accessor_sz ) {
+                if( static_cast<std::size_t>(sz) < io_manager_->swap_buffer_size_ + accessor_sz ) {
                     set_can_read(false);
                     return read_sz;
                 } else {
@@ -701,7 +699,7 @@ ServerSocket::~ServerSocket() {
     ::close( dummy_fd_ );
 }
 
-IOManager::IOManager() {
+IOManager::IOManager( std::size_t cap ) {
     epoll_fd_ = ::epoll_create1( EPOLL_CLOEXEC );
     VERIFY( epoll_fd_ > 0 );
 
@@ -727,6 +725,15 @@ IOManager::IOManager() {
 
     // Now we need to watch the read operation for this UDP socket.
     WatchRead(&ctrl_fd_);
+
+    if( cap == 0 ) {
+        static const std::size_t kDefaultRecvBufferSize = 3495200;
+        cap = kDefaultRecvBufferSize;
+    } 
+
+    swap_buffer_ = malloc(cap);
+    swap_buffer_size_ = cap;
+
 }
 
 IOManager::~IOManager() {
@@ -739,6 +746,8 @@ IOManager::~IOManager() {
     for( std::size_t i = 0 ; i < timer_queue_.size() ; ++i ) {
         delete timer_queue_[i].callback;
     }
+
+    free(swap_buffer_);
 }
 
 void IOManager::CtrlFd::OnReadNotify() {

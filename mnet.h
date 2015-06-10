@@ -1035,7 +1035,7 @@ private:
 
 class IOManager {
 public:
-    IOManager();
+    IOManager( std::size_t cap );
 
     ~IOManager();
 
@@ -1149,6 +1149,14 @@ private:
     Socket* new_accept_socket_;
     NetState pending_accept_state_;
     detail::ScopePtr<detail::AcceptCallback> pending_accept_callback_;
+
+
+    // A internal user level swap buffer. The default value for this buffer
+    // is the buffer size of TCP receive buffer size inside of kernel. This
+    // value decide how many system call we can save.
+    
+    void* swap_buffer_;
+    std::size_t swap_buffer_size_;
 
     // Friend class, those classes are classes that is inherited
     // from the detail::Pollable class. This class needs to access the private

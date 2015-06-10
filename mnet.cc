@@ -172,7 +172,7 @@ bool Buffer::Inject( const void* mem , std::size_t length ) {
 
 int Endpoint::Ipv4ToString( char* buf ) const {
     // Parsing the IPV4 into the string. The following code should
-    // only work on Linux since it assumes a Big endian order
+    // only work on little endian
     uint32_t c1,c2,c3,c4;
 
     c1 = ipv4_ &0xff;

@@ -169,7 +169,7 @@ template< typename N > struct TimeoutNotifier : public TimeoutCallback {
     TimeoutNotifier( N* n ) :notifier(n) {}
 };
 
-template< typename N > struct CloseNotifier : public CloseCallback {
+template< typename N > struct CloseNotifier_WithOnData : public CloseCallback {
     virtual void InvokeClose( const NetState& ok ) {
         notifier->OnClose( ok );
     }
@@ -177,8 +177,47 @@ template< typename N > struct CloseNotifier : public CloseCallback {
         notifier->OnData( sz );
     }
     N* notifier;
-    CloseNotifier( N* n ) : notifier(n) {}
+    CloseNotifier_WithOnData( N* n ) : notifier(n) {}
 };
+
+template< typename N > struct CloseNotifier_WithoutOnData : public CloseCallback {
+    virtual void InvokeClose( const NetState& ok ) {
+        notifier->OnClose( ok );
+    }
+    virtual void InvokeData( std::size_t sz ) {
+        sz = sz;
+    }
+    N* notifier;
+    CloseNotifier_WithoutOnData( N* n ) : notifier(n) {}
+};
+
+#define DECLARE_CONCEPT_CHECK(FN,SIG,SIGP)\
+    template< typename T > struct HasConcept_##FN { \
+        template< typename U , SIGP > struct Concept{ };\
+        template< typename U > \
+        static int Stub( ... ); \
+        template< typename U > \
+        static char Stub( Concept<T,&T::SIG>* ); \
+        static const bool result = sizeof( Stub<T>(NULL) ) == sizeof(char); \
+    }
+
+DECLARE_CONCEPT_CHECK(OnRead,OnRead,void (T::*)(Socket*,std::size_t,const NetState&));
+DECLARE_CONCEPT_CHECK(OnWrite,OnWrite,void (T::*)(Socket*,std::size_t,const NetState&));
+DECLARE_CONCEPT_CHECK(OnAccept,OnAccept,void (T::*)(Socket*,const NetState&));
+DECLARE_CONCEPT_CHECK(OnTimeout,OnTimeout,void (T::*)(int));
+DECLARE_CONCEPT_CHECK(OnConnect,OnConnect,void (T::*)(Socket*,const NetState&));
+DECLARE_CONCEPT_CHECK(OnClose_Data,OnData,void (T::*)(std::size_t));
+DECLARE_CONCEPT_CHECK(OnClose_Close,OnClose,void (T::*)( const NetState& ));
+
+// On C++03 we don't have static assert
+template< bool V > struct static_assert_result;
+template<> struct static_assert_result<true>{};
+
+#define STATIC_ASSERT(C,M) \
+    do { \
+        static_assert_result< C > M; \
+    } while(0)
+
 } // namespace
 
 // Helper funtion to bind a any type T to a specific class and then we are able to
@@ -186,32 +225,42 @@ template< typename N > struct CloseNotifier : public CloseCallback {
 
 template< typename T >
 ReadCallback* MakeReadCallback( T* n ) {
+    STATIC_ASSERT( HasConcept_OnRead<T>::result , No_On_Read_Is_Found );
     return new ReadNotifier<T>(n);
 }
 
 template< typename T >
 WriteCallback* MakeWriteCallback( T* n ) {
+    STATIC_ASSERT( HasConcept_OnWrite<T>::result , No_On_Write_Is_Found );
     return new WriteNotifier<T>(n);
 }
 
 template< typename T >
 AcceptCallback* MakeAcceptCallback( T* n ) {
+    STATIC_ASSERT( HasConcept_OnAccept<T>::result , No_On_Accept_Is_Found );
     return new AcceptNotifier<T>(n);
 }
 
 template< typename T >
 ConnectCallback* MakeConnectCallback( T* n ) {
+    STATIC_ASSERT( HasConcept_OnConnect<T>::result , No_On_Connect_Is_Found );
     return new ConnectNotifier<T>(n);
 }
 
 template< typename T >
 TimeoutCallback* MakeTimeoutCallback( T* n ) {
+    STATIC_ASSERT( HasConcept_OnTimeout<T>::result , No_On_Timeout_Is_Found );
     return new TimeoutNotifier<T>(n);
 }
 
 template< typename T >
 CloseCallback* MakeCloseCallback( T* n ) {
-    return new CloseNotifier<T>(n);
+    STATIC_ASSERT( HasConcept_OnClose_Close<T>::result , No_On_Close_Is_Found );
+    if( HasConcept_OnClose_Data<T>::result ) {
+        return new CloseNotifier_WithOnData<T>(n);
+    } else {
+        return new CloseNotifier_WithoutOnData<T>(n);
+    }
 }
 
 // A very tiny and simple ScopePtr serves as the replacement of the std::unqiue_ptr

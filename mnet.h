@@ -1035,7 +1035,7 @@ private:
 
 class IOManager {
 public:
-    IOManager( std::size_t cap );
+    IOManager( std::size_t cap=0 );
 
     ~IOManager();
 
@@ -1213,7 +1213,6 @@ void Socket::AsyncRead( T* notifier ) {
 template< typename T >
 void Socket::AsyncWrite( T* notifier ) {
     assert( state_ != CLOSED );
-    assert( user_write_callback_.IsNull() );
     assert( write_buffer().readable_size() != 0 );
     prev_write_size_ = 0;
 

@@ -12,7 +12,7 @@
 // The DO_INVOKE macro is a trick to help resolve the problem of that
 // during the user callback it register a new handler. However if we
 // remove the current handler this will remove the newly registered
-// handler user specify inside of the callback.
+// handl
 
 #define DO_INVOKE(X,T,...) \
     do { \
@@ -399,6 +399,8 @@ std::size_t Socket::DoRead( NetState* ok ) {
                 set_can_read(false);
                 return read_sz;
             } else {
+                if( errno == EINTR )
+                    continue;
                 // The current error is not recoverable, we just return with an error
                 // states here
                 ok->CheckPoint(state_category::kSystem,errno);
@@ -447,37 +449,40 @@ std::size_t Socket::DoRead( NetState* ok ) {
 std::size_t Socket::DoWrite( NetState* ok ) {
     assert( write_buffer().readable_size() > 0 );
     ok->Clear();
+    do {
+        // Start to write the data
+        Buffer::Accessor accessor = write_buffer().GetReadAccessor();
 
-    // Start to write the data
-    Buffer::Accessor accessor = write_buffer().GetReadAccessor();
-    // Trying to send out the data to underlying TCP socket
-    ssize_t sz = ::write(fd(),accessor.address(),accessor.size());
+        // Trying to send out the data to underlying TCP socket
+        ssize_t sz = ::write(fd(),accessor.address(),accessor.size());
 
-    // Write can return zero which has same meaning with negative
-    // value( I guess this is for historic reason ). What we gonna
-    // do is that we will treat zero and -1 as same stuff and check
-    // the errno value
-
-    if( UNLIKELY(sz <= 0) ) {
-        if( LIKELY(errno == EAGAIN || errno == EWOULDBLOCK) ) {
-            // This is a partial operation, we need to wait until epoll_wait
-            // to wake me up
-            set_can_write(false);
-            return 0;
+        // Write can return zero which has same meaning with negative
+        // value( I guess this is for historic reason ). What we gonna
+        // do is that we will treat zero and -1 as same stuff and check
+        // the errno value
+        if( UNLIKELY(sz <= 0) ) {
+            if( LIKELY(errno == EAGAIN || errno == EWOULDBLOCK) ) {
+                // This is a partial operation, we need to wait until epoll_wait
+                // to wake me up
+                set_can_write(false);
+                return 0;
+            } else {
+                if( errno == EINTR )
+                    continue;
+                // Set up the error object and record the error string
+                ok->CheckPoint(state_category::kSystem,errno);
+                // Return the size of the data has been sent to the kernel
+                return prev_write_size_;
+            }
         } else {
-            // Set up the error object and record the error string
-            ok->CheckPoint(state_category::kSystem,errno);
-            // Return the size of the data has been sent to the kernel
-            return prev_write_size_;
+            // Set up the committed size
+            if( static_cast<std::size_t>(sz) < accessor.size() ) {
+                set_can_write(false);
+            }
+            accessor.set_committed_size( static_cast<std::size_t>(sz) );
+            return static_cast<std::size_t>(sz);
         }
-    } else {
-        // Set up the committed size
-        if( static_cast<std::size_t>(sz) < accessor.size() ) {
-            set_can_write(false);
-        }
-        accessor.set_committed_size( static_cast<std::size_t>(sz) );
-        return static_cast<std::size_t>(sz);
-    }
+    } while(true);
 }
 
 void Socket::GetLocalEndpoint( Endpoint* endpoint ) {
@@ -620,23 +625,27 @@ void ServerSocket::HandleRunOutOfFD( int err ) {
 
 int ServerSocket::DoAccept( NetState* state ) {
     assert( can_read() );
-    int nfd = ::accept4( fd() , NULL , NULL , O_CLOEXEC | O_NONBLOCK );
-    if( UNLIKELY(nfd < 0) ) {
-        if( LIKELY(errno == EAGAIN || errno == EWOULDBLOCK) ) {
-            set_can_read(false);
-            return -1;
-        } else {
-            int err = errno;
-            HandleRunOutOfFD( err );
-            state->CheckPoint(state_category::kSystem,err);
-            if( errno == EAGAIN || errno == EWOULDBLOCK ) {
+    do {
+        int nfd = ::accept4( fd() , NULL , NULL , O_CLOEXEC | O_NONBLOCK );
+        if( UNLIKELY(nfd < 0) ) {
+            if( LIKELY(errno == EAGAIN || errno == EWOULDBLOCK) ) {
                 set_can_read(false);
+                return -1;
+            } else {
+                if( errno == EINTR ) 
+                    continue;
+                int err = errno;
+                HandleRunOutOfFD( err );
+                state->CheckPoint(state_category::kSystem,err);
+                if( errno == EAGAIN || errno == EWOULDBLOCK ) {
+                    set_can_read(false);
+                }
+                return -1;
             }
-            return -1;
+        } else {
+            return nfd;
         }
-    } else {
-        return nfd;
-    }
+    } while( true );
 }
 
 void ServerSocket::OnReadNotify() {
